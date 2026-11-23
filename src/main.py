@@ -10,6 +10,8 @@ Outputs:
 
 from __future__ import annotations
 
+import mimetypes
+import time
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +46,34 @@ from src.services.roster_importer import RosterImporter
 from src.utils.ip_resolver import ClientIPResolver
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+# Windows registries sometimes map `.js` to `text/plain`, which makes browsers refuse
+# ES modules; register the correct types explicitly so the UI loads on every OS.
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("image/svg+xml", ".svg")
+
+
+def resolve_public_origin(request: Request, config: AppConfig) -> str:
+    """
+    Purpose:
+        Work out the public origin (scheme + host) that students must open, so QR links
+        point at the Cloudflare Tunnel / Render URL instead of the server's local address.
+    Inputs:
+        request (Request): Incoming FastAPI request (proxy headers are inspected).
+        config (AppConfig): Configuration; `public_base_url` wins when set.
+    Outputs:
+        str: Origin without a trailing slash, e.g. `https://abc.trycloudflare.com`.
+    """
+    if config.public_base_url:
+        return config.public_base_url.rstrip("/")
+
+    # Proxies may send comma-separated chains; the first entry is the original client-facing value
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
+    forwarded_host = request.headers.get("x-forwarded-host", "").split(",")[0].strip()
+    scheme = forwarded_proto or request.url.scheme
+    host = forwarded_host or request.headers.get("host", "") or request.url.netloc
+    return f"{scheme}://{host}".rstrip("/")
 DEFAULT_ROSTER_ASSET = (
     Path(__file__).resolve().parent.parent
     / "assets"
@@ -478,15 +508,18 @@ def create_app(
     ) -> dict[str, Any]:
         """
         Purpose:
-            Return the imported student roster from `/students`, optionally filtered
-            by search query `q` (name/email) or `group`.
+            Lecturer-protected endpoint returning the imported student roster from
+            `/students`, optionally filtered by search query `q` (name/email) or `group`.
+            Students never see this list (it contains emails); they get names only
+            through the QR-gated `/api/attendance/checkin-context` endpoint.
         Inputs:
-            request (Request): Incoming FastAPI request.
+            request (Request): Incoming FastAPI request (requires Lecturer JWT).
             q (str | None): Optional search query substring.
             group (str | None): Optional group filter.
         Outputs:
             dict[str, Any]: Dictionary with `count` and list of `students`.
         """
+        request.app.state.auth_service.require_lecturer_claims(request)
         importer: RosterImporter = request.app.state.roster_importer
         students = importer.list_students(search_query=q, group_filter=group)
         return {"count": len(students), "students": students}
@@ -511,7 +544,7 @@ def create_app(
         mgr: AttendanceManager = request.app.state.attendance_manager
         lecturer_ip = ClientIPResolver.resolve(request)
         try:
-            return mgr.start_session(
+            session = mgr.start_session(
                 lesson_id=payload.lesson_id,
                 lesson_title=payload.lesson_title or payload.lesson_id,
                 lecturer_ip=lecturer_ip,
@@ -523,19 +556,80 @@ def create_app(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             ) from exc
 
+        # A loopback/private lecturer IP can never match phones on the classroom Wi-Fi
+        # (typical when the dashboard is opened via http://localhost instead of the tunnel URL).
+        ip_warning = None
+        if session.get("enforce_same_network") and ClientIPResolver.is_loopback_or_private(
+            lecturer_ip
+        ):
+            ip_warning = (
+                f"Your captured IP ({lecturer_ip}) is a local address, so students on the "
+                "classroom Wi-Fi will fail the same-network check. Open this dashboard through "
+                "the public tunnel/Render URL, or turn the Same-Network check off."
+            )
+        return {**session, "ip_warning": ip_warning}
+
     @fastapi_app.get("/api/attendance/sessions", response_class=JSONResponse)
     async def list_attendance_sessions_endpoint(request: Request) -> dict[str, Any]:
         """
         Purpose:
-            List all attendance sessions stored in Firebase RTDB.
+            Lecturer-protected listing of all attendance sessions stored in Firebase RTDB.
         Inputs:
-            request (Request): Incoming FastAPI request.
+            request (Request): Incoming FastAPI request (requires Lecturer JWT).
         Outputs:
             dict[str, Any]: Dictionary with `count` and `sessions`.
         """
+        request.app.state.auth_service.require_lecturer_claims(request)
         mgr: AttendanceManager = request.app.state.attendance_manager
         sessions = mgr.list_sessions()
         return {"count": len(sessions), "sessions": sessions}
+
+    @fastapi_app.get(
+        "/api/attendance/checkin-context", response_class=JSONResponse
+    )
+    async def checkin_context_endpoint(
+        request: Request,
+        lesson_id: str = Query(...),
+        qr_token: str = Query(...),
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Public, QR-gated endpoint for the student mobile check-in page. It verifies the
+            scanned rotating token and, only then, returns the lesson title and the list of
+            roster names (`student_id` + `full_name`, no emails/groups) for the searchable
+            dropdown. Someone without a valid, unexpired QR token cannot enumerate the class.
+        Inputs:
+            request (Request): Incoming FastAPI request.
+            lesson_id (str): Lesson identifier from the QR link.
+            qr_token (str): Signed rotating QR token from the QR link.
+        Outputs:
+            dict[str, Any]: `lesson_id`, `lesson_title`, `enforce_same_network`, and `students`.
+        """
+        mgr: AttendanceManager = request.app.state.attendance_manager
+        importer: RosterImporter = request.app.state.roster_importer
+        session = mgr.get_session(lesson_id)
+        if session is None or not session.get("active", False):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This attendance session is not open.",
+            )
+        try:
+            mgr.verify_qr_token(qr_token, expected_lesson_id=lesson_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+        names = [
+            {"student_id": stu["student_id"], "full_name": stu.get("full_name", "")}
+            for stu in importer.list_students()
+        ]
+        return {
+            "lesson_id": session["lesson_id"],
+            "lesson_title": session.get("lesson_title", session["lesson_id"]),
+            "enforce_same_network": bool(session.get("enforce_same_network", True)),
+            "students": names,
+        }
 
     @fastapi_app.get(
         "/api/attendance/sessions/{lesson_id}", response_class=JSONResponse
@@ -545,13 +639,14 @@ def create_app(
     ) -> dict[str, Any]:
         """
         Purpose:
-            Retrieve the attendance report and roster check-in matrix for a lesson.
+            Lecturer-protected attendance report and roster check-in matrix for a lesson.
         Inputs:
             lesson_id (str): Target lesson identifier.
-            request (Request): Incoming FastAPI request.
+            request (Request): Incoming FastAPI request (requires Lecturer JWT).
         Outputs:
             dict[str, Any]: Complete attendance report.
         """
+        request.app.state.auth_service.require_lecturer_claims(request)
         mgr: AttendanceManager = request.app.state.attendance_manager
         return mgr.get_lesson_attendance_report(lesson_id)
 
@@ -635,15 +730,17 @@ def create_app(
         svc.require_lecturer_claims(request)
 
         mgr: AttendanceManager = request.app.state.attendance_manager
-        base_url = str(request.base_url).rstrip("/")
+        base_url = resolve_public_origin(request, request.app.state.config)
         try:
-            return mgr.generate_rotating_qr_token(
+            payload = mgr.generate_rotating_qr_token(
                 lesson_id=lesson_id, base_url=base_url
             )
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             ) from exc
+        # server_time lets the browser compute the countdown without trusting its own clock
+        return {**payload, "server_time": int(time.time())}
 
     @fastapi_app.post("/api/attendance/checkin", response_class=JSONResponse)
     async def student_qr_checkin_endpoint(

@@ -275,11 +275,13 @@ class AttendanceManager:
         Inputs:
             lesson_id (str): Active lesson identifier.
             base_url (str): Optional public origin URL (e.g., Cloudflare Tunnel or Render URL).
-            ttl_override_seconds (int | None): Optional custom lifetime in seconds (used in tests).
+            ttl_override_seconds (int | None): Optional custom lifetime in seconds (used in tests);
+                when set it replaces both the rotation period and the validity window.
             now_ts (int | None): Optional UNIX timestamp override for deterministic testing.
         Outputs:
             dict[str, Any]: Payload containing `lesson_id`, `qr_token`, `checkin_url`,
-            `qr_image_data_url`, `issued_at`, `expires_at`, and `ttl_seconds`.
+            `qr_image_data_url`, `issued_at`, `expires_at`, `ttl_seconds` (how often the QR
+            rotates on screen) and `valid_for_seconds` (how long the token is accepted).
         """
         session = self.get_session(lesson_id)
         if session is None:
@@ -288,12 +290,19 @@ class AttendanceManager:
             raise ValueError(f"Attendance session '{lesson_id}' is currently closed.")
 
         issued_at = int(now_ts) if now_ts is not None else int(time.time())
-        ttl_seconds = (
-            int(ttl_override_seconds)
-            if ttl_override_seconds is not None
-            else int(session.get("rotation_seconds", self.config.qr_rotation_seconds))
-        )
-        expires_at = issued_at + ttl_seconds
+        if ttl_override_seconds is not None:
+            # Explicit override (used by tests): rotation period and validity are identical
+            rotation_seconds = int(ttl_override_seconds)
+            valid_for_seconds = rotation_seconds
+        else:
+            rotation_seconds = int(
+                session.get("rotation_seconds", self.config.qr_rotation_seconds)
+            )
+            # A student needs time to scan, load the page, pick a name and submit, so a
+            # rotated-out token stays acceptable for `qr_grace_seconds` extra seconds.
+            valid_for_seconds = rotation_seconds + max(0, self.config.qr_grace_seconds)
+        ttl_seconds = rotation_seconds
+        expires_at = issued_at + valid_for_seconds
 
         claims = {
             "type": "qr_attendance",
@@ -320,6 +329,7 @@ class AttendanceManager:
             "issued_at": issued_at,
             "expires_at": expires_at,
             "ttl_seconds": ttl_seconds,
+            "valid_for_seconds": valid_for_seconds,
             "enforce_same_network": bool(session.get("enforce_same_network", True)),
             "lecturer_ip": session.get("lecturer_ip", "127.0.0.1"),
         }

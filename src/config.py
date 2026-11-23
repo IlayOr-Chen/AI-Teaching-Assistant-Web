@@ -37,6 +37,11 @@ class AppConfig:
         gemini_model (str): Default Gemini model identifier (e.g., `gemini-2.5-flash-lite`).
         yolo_model_path (str): Path or model name for Ultralytics YOLO weights.
         yolo_confidence_threshold (float): Minimum detection confidence for person bounding boxes.
+        qr_grace_seconds (int): Extra seconds a rotating QR token stays valid after it is
+            replaced on the lecturer screen, so students have time to scan, open the page,
+            pick their name, and submit.
+        public_base_url (str): Optional public origin (Cloudflare Tunnel / Render URL) used to
+            build QR check-in links; auto-detected from proxy headers when empty.
     Outputs:
         An immutable `AppConfig` instance accessible across services and repositories.
     """
@@ -55,6 +60,8 @@ class AppConfig:
     gemini_model: str = "gemini-2.5-flash-lite"
     yolo_model_path: str = "yolov8n.pt"
     yolo_confidence_threshold: float = 0.30
+    qr_grace_seconds: int = 60
+    public_base_url: str = ""
 
     @classmethod
     def from_env(cls, env_file: str | None = None) -> AppConfig:
@@ -103,4 +110,6 @@ class AppConfig:
             yolo_confidence_threshold=float(
                 os.getenv("YOLO_CONFIDENCE_THRESHOLD", "0.30")
             ),
+            qr_grace_seconds=int(os.getenv("QR_GRACE_SECONDS", "60")),
+            public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),
         )

@@ -10,6 +10,7 @@ Outputs:
 
 from __future__ import annotations
 
+import ipaddress
 from collections.abc import Mapping
 from fastapi import Request
 
@@ -64,6 +65,24 @@ class ClientIPResolver:
         # Priority 3: Direct client socket host fallback
         host = (fallback_host or "127.0.0.1").strip() or "127.0.0.1"
         return host, "client.host"
+
+    @staticmethod
+    def is_loopback_or_private(ip_address: str) -> bool:
+        """
+        Purpose:
+            Detect addresses that can never be a classroom's shared public IP
+            (loopback `127.0.0.1` / `::1` or private LAN ranges such as `192.168.x.x`),
+            so the lecturer can be warned that the same-network check cannot work.
+        Inputs:
+            ip_address (str): IPv4/IPv6 address string.
+        Outputs:
+            bool: True for loopback/private/link-local/unparseable addresses.
+        """
+        try:
+            parsed = ipaddress.ip_address(ip_address.strip())
+        except ValueError:
+            return True
+        return parsed.is_loopback or parsed.is_private or parsed.is_link_local
 
     @classmethod
     def resolve(cls, request: Request) -> str:
