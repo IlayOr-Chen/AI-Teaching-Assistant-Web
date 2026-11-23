@@ -232,6 +232,8 @@ serviceAccountKey.json
 tmp/
 uploads/
 *.mp4
+*.pt
+*.onnx
 annotated_*.jpg
 annotated_*.jpeg
 annotated_*.png

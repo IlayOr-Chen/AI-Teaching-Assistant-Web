@@ -39,6 +39,7 @@ from src.services.auth_service import (
     STUDENT_COOKIE_NAME,
     AuthService,
 )
+from src.services.photo_head_counter import PhotoHeadCounter
 from src.services.roster_importer import RosterImporter
 from src.utils.ip_resolver import ClientIPResolver
 
@@ -47,6 +48,9 @@ DEFAULT_ROSTER_ASSET = (
     Path(__file__).resolve().parent.parent
     / "assets"
     / "courseid_130158_participants.xlsx"
+)
+DEFAULT_CLASSROOM_PHOTO_ASSET = (
+    Path(__file__).resolve().parent.parent / "assets" / "p3.jpeg"
 )
 
 
@@ -181,6 +185,9 @@ def create_app(
     attendance_manager = AttendanceManager(
         repository=resolved_repo, config=resolved_config
     )
+    photo_head_counter = PhotoHeadCounter(
+        repository=resolved_repo, config=resolved_config
+    )
 
     fastapi_app = FastAPI(
         title="Web-Based AI Teaching Assistant",
@@ -197,6 +204,7 @@ def create_app(
     fastapi_app.state.auth_service = auth_service
     fastapi_app.state.roster_importer = roster_importer
     fastapi_app.state.attendance_manager = attendance_manager
+    fastapi_app.state.photo_head_counter = photo_head_counter
 
     if STATIC_DIR.is_dir():
         fastapi_app.mount(
@@ -714,6 +722,66 @@ def create_app(
                 lecturer_ip=lecturer_ip,
             )
             return {"lesson_id": lesson_id, "record": record}
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+    @fastapi_app.post("/api/attendance/headcount", response_class=JSONResponse)
+    async def analyze_classroom_photo_endpoint(
+        request: Request,
+        file: UploadFile | None = File(default=None),
+        lesson_id: str | None = Query(default=None),
+        registered_count: int | None = Query(default=None),
+        use_default_asset: bool = Query(default=False),
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Lecturer-protected endpoint that runs local Ultralytics YOLO person detection
+            on an uploaded classroom photo (or `/assets/p3.jpeg` when `use_default_asset=true`),
+            returns the annotated image with bounding boxes and confidence scores, and
+            computes the GREEN / ORANGE / RED status indicator against self-registered attendance.
+        Inputs:
+            request (Request): Incoming FastAPI request (requires Lecturer JWT).
+            file (UploadFile | None): Uploaded JPEG/PNG classroom photo.
+            lesson_id (str | None): Optional lesson session ID to link and compare with.
+            registered_count (int | None): Optional override for self-registered student count.
+            use_default_asset (bool): When True and no file is uploaded, analyzes `/assets/p3.jpeg`.
+        Outputs:
+            dict[str, Any]: Full YOLO headcount report and annotated image Data URL.
+        """
+        svc: AuthService = request.app.state.auth_service
+        svc.require_lecturer_claims(request)
+
+        counter: PhotoHeadCounter = request.app.state.photo_head_counter
+        try:
+            if file is not None:
+                filename = (file.filename or "").lower()
+                if not filename.endswith((".jpg", ".jpeg", ".png", ".webp")):
+                    raise ValueError(
+                        "Invalid photo file type. Please upload a JPEG, PNG, or WebP classroom photo."
+                    )
+                image_bytes = await file.read()
+                return counter.analyze_classroom_photo(
+                    image_source=image_bytes,
+                    lesson_id=lesson_id,
+                    registered_count=registered_count,
+                )
+
+            if use_default_asset:
+                return counter.analyze_classroom_photo(
+                    image_source=DEFAULT_CLASSROOM_PHOTO_ASSET,
+                    lesson_id=lesson_id,
+                    registered_count=registered_count,
+                )
+
+            raise ValueError(
+                "Please upload a classroom photo or set use_default_asset=true."
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+            ) from exc
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)

@@ -5,7 +5,8 @@ Purpose:
 Inputs:
     None.
 Outputs:
-    Exports `AuthService`, `RosterImporter`, `AttendanceManager`, and cookie constants.
+    Exports `AuthService`, `RosterImporter`, `AttendanceManager`, `PhotoHeadCounter`,
+    and cookie constants.
 """
 
 from src.services.attendance_manager import (
@@ -17,6 +18,7 @@ from src.services.auth_service import (
     STUDENT_COOKIE_NAME,
     AuthService,
 )
+from src.services.photo_head_counter import PhotoHeadCounter
 from src.services.roster_importer import RosterImporter
 
 __all__ = [
@@ -24,6 +26,7 @@ __all__ = [
     "AuthService",
     "DEVICE_COOKIE_NAME",
     "LECTURER_COOKIE_NAME",
+    "PhotoHeadCounter",
     "RosterImporter",
     "STUDENT_COOKIE_NAME",
 ]
