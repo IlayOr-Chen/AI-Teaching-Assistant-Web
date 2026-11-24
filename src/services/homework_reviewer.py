@@ -527,6 +527,8 @@ class HomeworkReviewer:
         Purpose:
             Lecturer one-click "End Submission Now" action: immediately closes
             submissions on `assignment_id` and unlocks AI reviews and peer comparisons.
+            Explicitly preserves and injects `assignment_id` so older Firebase records
+            whose key exists only on the parent path never fail with `KeyError`.
         Inputs:
             assignment_id (str): Target homework assignment ID.
             now_ts (int | None): Optional UNIX timestamp override.
@@ -541,9 +543,21 @@ class HomeworkReviewer:
         ended_ts = int(now_ts) if now_ts is not None else int(time.time())
         merged = self.repository.update(
             f"/homework_assignments/{clean_id}",
-            {"ended_manually": True, "ended_at": ended_ts},
+            {
+                "assignment_id": clean_id,
+                "ended_manually": True,
+                "ended_at": ended_ts,
+            },
         )
-        return self._format_assignment_overview(merged, now_ts=ended_ts)
+        merged_dict = dict(raw)
+        if isinstance(merged, dict):
+            merged_dict.update(merged)
+        merged_dict["assignment_id"] = str(
+            merged_dict.get("assignment_id") or clean_id
+        )
+        return self._format_assignment_overview(
+            merged_dict, now_ts=ended_ts, assignment_id=clean_id
+        )
 
     def _generate_peer_comparison(
         self,
@@ -581,11 +595,13 @@ class HomeworkReviewer:
                 "common_gaps": [],
             }
 
-        target_id = target_submission["student_id"]
+        target_id = str(target_submission.get("student_id") or "")
         peer_subs = [
             sub
             for sid, sub in all_submissions.items()
-            if sid != target_id and isinstance(sub, dict)
+            if sid != target_id
+            and str(sub.get("student_id") or sid) != target_id
+            and isinstance(sub, dict)
         ]
         peer_count = len(peer_subs)
         target_words = int(target_submission.get("word_count", 0))
@@ -870,31 +886,39 @@ class HomeworkReviewer:
         raw_assignment: dict[str, Any],
         viewer_id: str | None = None,
         now_ts: int | None = None,
+        assignment_id: str | None = None,
     ) -> dict[str, Any]:
         """
         Purpose:
             Format a homework assignment summary including submission count, release
             gate status (`review_released`), and whether `viewer_id` has submitted.
+            Safely falls back to `assignment_id` parameter if `raw_assignment` lacks
+            an embedded `"assignment_id"` key.
         Inputs:
             raw_assignment (dict[str, Any]): Raw assignment dictionary from Firebase RTDB.
             viewer_id (str | None): Optional student ID to check submission status.
             now_ts (int | None): Optional current UNIX timestamp override.
+            assignment_id (str | None): Optional fallback assignment ID from the RTDB key.
         Outputs:
             dict[str, Any]: Formatted assignment overview dictionary.
         """
-        raw_subs = raw_assignment.get("submissions")
+        safe_assignment = raw_assignment if isinstance(raw_assignment, dict) else {}
+        resolved_aid = str(
+            safe_assignment.get("assignment_id") or assignment_id or ""
+        ).strip()
+        raw_subs = safe_assignment.get("submissions")
         subs_map = raw_subs if isinstance(raw_subs, dict) else {}
-        released = self.is_review_released(raw_assignment, now_ts=now_ts)
+        released = self.is_review_released(safe_assignment, now_ts=now_ts)
 
         submitted_students = [
             {
-                "student_id": sub.get("student_id", sid),
-                "student_name": sub.get("student_name", sid),
-                "filename": sub.get("filename", ""),
-                "submission_type": sub.get("submission_type", "file:pdf"),
+                "student_id": str(sub.get("student_id") or sid),
+                "student_name": str(sub.get("student_name") or sid),
+                "filename": str(sub.get("filename") or ""),
+                "submission_type": str(sub.get("submission_type") or "file:pdf"),
                 "repo_url": sub.get("repo_url"),
-                "page_count": sub.get("page_count", 1),
-                "word_count": sub.get("word_count", 0),
+                "page_count": int(sub.get("page_count") or 1),
+                "word_count": int(sub.get("word_count") or 0),
                 "submitted_at": sub.get("submitted_at"),
             }
             for sid, sub in subs_map.items()
@@ -905,14 +929,14 @@ class HomeworkReviewer:
         )
 
         return {
-            "assignment_id": raw_assignment["assignment_id"],
-            "title": raw_assignment.get("title", ""),
-            "description": raw_assignment.get("description", ""),
-            "lesson_tag": raw_assignment.get("lesson_tag", "Lesson 1"),
-            "deadline_ts": int(raw_assignment.get("deadline_ts", 0)),
-            "ended_manually": bool(raw_assignment.get("ended_manually", False)),
-            "ended_at": raw_assignment.get("ended_at"),
-            "created_at": int(raw_assignment.get("created_at", 0)),
+            "assignment_id": resolved_aid,
+            "title": str(safe_assignment.get("title") or resolved_aid),
+            "description": str(safe_assignment.get("description") or ""),
+            "lesson_tag": str(safe_assignment.get("lesson_tag") or "Lesson 1"),
+            "deadline_ts": int(safe_assignment.get("deadline_ts") or 0),
+            "ended_manually": bool(safe_assignment.get("ended_manually", False)),
+            "ended_at": safe_assignment.get("ended_at"),
+            "created_at": int(safe_assignment.get("created_at") or 0),
             "review_released": released,
             "submission_count": len(submitted_students),
             "viewer_has_submitted": bool(viewer_id and viewer_id in subs_map),
@@ -925,20 +949,27 @@ class HomeworkReviewer:
         """
         Purpose:
             List all homework assignments from `/homework_assignments` ordered newest-first.
+            Supports older Firebase assignment records even when `assignment_id` exists
+            only as the parent dictionary key.
         Inputs:
             viewer_id (str | None): Optional student ID to populate `viewer_has_submitted`.
             now_ts (int | None): Optional current UNIX timestamp override.
         Outputs:
-            list[str | dict[str, Any]]: Ordered list of formatted homework assignments.
+            list[dict[str, Any]]: Ordered list of formatted homework assignments.
         """
         raw_all = self.repository.get("/homework_assignments")
         if not isinstance(raw_all, dict):
             return []
 
         results = [
-            self._format_assignment_overview(item, viewer_id=viewer_id, now_ts=now_ts)
-            for item in raw_all.values()
-            if isinstance(item, dict) and "assignment_id" in item
+            self._format_assignment_overview(
+                item,
+                viewer_id=viewer_id,
+                now_ts=now_ts,
+                assignment_id=str(aid),
+            )
+            for aid, item in raw_all.items()
+            if isinstance(item, dict)
         ]
-        results.sort(key=lambda a: int(a.get("created_at", 0)), reverse=True)
+        results.sort(key=lambda a: int(a.get("created_at") or 0), reverse=True)
         return results

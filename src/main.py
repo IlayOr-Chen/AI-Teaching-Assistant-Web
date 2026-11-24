@@ -47,7 +47,7 @@ from src.services.auth_service import (
     AuthService,
 )
 from src.services.comment_service import CommentService
-from src.services.gemini_client import GeminiClient
+from src.services.gemini_client import GeminiClient, GeminiHighDemandError
 from src.services.homework_reviewer import HomeworkReviewer
 from src.services.photo_head_counter import PhotoHeadCounter
 from src.services.poll_service import PollService
@@ -335,7 +335,7 @@ class SummarizeYoutubeVideoRequest(BaseModel):
     Purpose:
         Pydantic schema for summarizing a public YouTube lecture video directly via Gemini.
     Inputs:
-        youtube_url (str), lesson_tag (str), lecturer_notes (str).
+        youtube_url (str), lesson_tag (str), lecturer_notes (str), video_mode (str).
     Outputs:
         Validated `SummarizeYoutubeVideoRequest` instance.
     """
@@ -343,6 +343,7 @@ class SummarizeYoutubeVideoRequest(BaseModel):
     youtube_url: str
     lesson_tag: str = "Lesson 1"
     lecturer_notes: str = ""
+    video_mode: str = "transcript"
 
 
 def create_app(
@@ -1507,6 +1508,7 @@ def create_app(
         return gemini.get_settings()
 
     @fastapi_app.put("/api/settings/gemini", response_class=JSONResponse)
+    @fastapi_app.post("/api/settings/gemini", response_class=JSONResponse)
     async def update_gemini_settings_endpoint(
         payload: UpdateGeminiSettingsRequest, request: Request
     ) -> dict[str, Any]:
@@ -1534,75 +1536,25 @@ def create_app(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             ) from exc
 
-    @fastapi_app.post("/api/video/summarize", response_class=JSONResponse)
-    async def summarize_lecture_video_endpoint(
+    @fastapi_app.delete("/api/settings/gemini", response_class=JSONResponse)
+    async def clear_gemini_settings_key_endpoint(
         request: Request,
-        file: UploadFile | None = File(default=None),
-        youtube_url: str | None = Query(default=None),
-        lesson_tag: str = Query(default="Lesson 1"),
-        lecturer_notes: str = Query(default=""),
     ) -> dict[str, Any]:
         """
         Purpose:
-            Lecturer-protected endpoint for Feature 4 (ML Lecture Video Summary).
-            Supports either an uploaded `.mp4` file (`<= 20 MB`, uploaded via the Gemini
-            Files API) OR a public `youtube_url` (passed directly to Gemini via `Part.from_uri`),
-            returning a concise structured summary (Executive Summary, Key Topics, Core
-            Takeaways, Action Items, and Lecturer Delivery Insights).
+            Lecturer-protected endpoint that explicitly clears/deletes the stored
+            Gemini API key in Firebase RTDB (`/settings/gemini`) while keeping the
+            configured model ID, returning `has_api_key=False` and `has_key=False`.
         Inputs:
             request (Request): Incoming FastAPI request.
-            file (UploadFile | None): Uploaded `.mp4` lecture video file.
-            youtube_url (str | None): Optional public YouTube URL.
-            lesson_tag (str): Associated lesson identifier tag.
-            lecturer_notes (str): Optional context notes.
         Outputs:
-            dict[str, Any]: Structured lecture video summary record.
+            dict[str, Any]: Updated Gemini settings dictionary with `has_api_key=False`.
         """
         svc: AuthService = request.app.state.auth_service
         svc.require_lecturer_claims(request)
 
-        summarizer: VideoSummarizer = request.app.state.video_summarizer
-        header_api_key = request.headers.get("X-Gemini-Api-Key")
-        header_model = request.headers.get("X-Gemini-Model")
-        try:
-            if youtube_url and youtube_url.strip():
-                return await run_in_threadpool(
-                    summarizer.summarize_video,
-                    youtube_url=youtube_url.strip(),
-                    lesson_tag=lesson_tag,
-                    lecturer_notes=lecturer_notes,
-                    gemini_api_key=header_api_key,
-                    gemini_model_id=header_model,
-                )
-            if file is None:
-                raise ValueError(
-                    "Please upload an MP4 (.mp4) video file or provide a public YouTube URL."
-                )
-            raw_bytes = await file.read()
-            return await run_in_threadpool(
-                summarizer.summarize_video,
-                filename=file.filename or "",
-                video_bytes=raw_bytes,
-                content_type=file.content_type,
-                lesson_tag=lesson_tag,
-                lecturer_notes=lecturer_notes,
-                gemini_api_key=header_api_key,
-                gemini_model_id=header_model,
-            )
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
-            ) from exc
-        except RuntimeError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
-            ) from exc
-        except Exception as exc:
-            logger.exception("Unexpected error during video summarization: %s", exc)
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Video summarization failed: {exc}",
-            ) from exc
+        gemini: GeminiClient = request.app.state.gemini_client
+        return gemini.update_settings(api_key="")
 
     @fastapi_app.post("/api/video/summarize-youtube", response_class=JSONResponse)
     async def summarize_youtube_video_endpoint(
@@ -1611,11 +1563,13 @@ def create_app(
     ) -> dict[str, Any]:
         """
         Purpose:
-            Lecturer-protected endpoint that passes a public YouTube video URL directly
-            to the Gemini API (`types.Part.from_uri(file_uri=youtube_url, mime_type="video/mp4")`)
-            and persists the structured lecture summary under `/video_summaries`.
+            Lecturer-protected endpoint for Feature 4 (AI Lecture Video Summary — YouTube Only).
+            Canonicalizes the public YouTube video URL, passes it directly to the Gemini API
+            with `VideoMetadata(content_layers=...)` (`"transcript"` default, `"audio"`, or
+            `"full_video"`), and persists the rich structured academic summary under
+            `/video_summaries`.
         Inputs:
-            payload (SummarizeYoutubeVideoRequest): Public YouTube URL, lesson tag, and optional notes.
+            payload (SummarizeYoutubeVideoRequest): Public YouTube URL, lesson tag, notes, and video_mode.
             request (Request): Incoming FastAPI request.
         Outputs:
             dict[str, Any]: Structured lecture video summary record.
@@ -1632,12 +1586,17 @@ def create_app(
                 youtube_url=payload.youtube_url,
                 lesson_tag=payload.lesson_tag,
                 lecturer_notes=payload.lecturer_notes,
+                video_mode=payload.video_mode,
                 gemini_api_key=header_api_key,
                 gemini_model_id=header_model,
             )
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+        except GeminiHighDemandError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
             ) from exc
         except RuntimeError as exc:
             raise HTTPException(
@@ -1761,7 +1720,9 @@ def create_app(
 
         reviewer: HomeworkReviewer = request.app.state.homework_reviewer
         try:
-            return reviewer.end_submission_now(assignment_id=assignment_id)
+            return await run_in_threadpool(
+                reviewer.end_submission_now, assignment_id=assignment_id
+            )
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
@@ -1842,6 +1803,10 @@ def create_app(
                 else status.HTTP_400_BAD_REQUEST
             )
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        except GeminiHighDemandError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from exc
         except RuntimeError as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
@@ -1902,6 +1867,10 @@ def create_app(
                 else status.HTTP_400_BAD_REQUEST
             )
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        except GeminiHighDemandError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from exc
         except RuntimeError as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
@@ -1957,6 +1926,10 @@ def create_app(
                 else status.HTTP_400_BAD_REQUEST
             )
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        except GeminiHighDemandError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from exc
         except RuntimeError as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)

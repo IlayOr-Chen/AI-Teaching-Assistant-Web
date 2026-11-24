@@ -1,16 +1,20 @@
 """
 Purpose:
-    Implements `VideoSummarizer` for Feature 4 (ML Lecture Video Summary — MP4 Only + Gemini Files API)
-    persisted in Firebase Realtime Database under `/video_summaries`. Enforces strict `.mp4`
-    file extension and MIME type validation, uploads the full MP4 recording via `GeminiClient`
-    (using the official `google-genai` Files API so large >100 MB lectures are analyzed in full),
-    and generates an accurate structured English summary of the actual spoken and visual content
-    of the lecture (Executive Summary, Key Topics, Core Takeaways, Action Items, and Lecturer
-    Delivery Insights on pacing, clarity, and audio quality).
+    Implements `VideoSummarizer` for Feature 4 (AI Lecture Video Summary — YouTube URL Only +
+    Gemini `VideoMetadata` `content_layers` fast 45-90 min lecture analysis) persisted in Firebase
+    Realtime Database under `/video_summaries`. Validates and canonicalizes public YouTube URLs
+    (stripping playlist parameters `&list=...`, `&index=...`, etc. down to the clean
+    `https://www.youtube.com/watch?v=<11_char_video_id>`), passes the video directly to
+    `GeminiClient` using `Fast (Transcript)`, `Audio Only`, or `Full Video (Low FPS)` mode,
+    and generates a rich, structured English academic summary (Executive Summary TL;DR,
+    Detailed Narrative Walkthrough `detailed_overview`, Key Concepts & Definitions `key_concepts`,
+    Key Topics, Core Learning Takeaways, Quick Review Questions `study_questions`, Action Items,
+    and Lecturer Delivery Insights).
 Inputs:
     `FirebaseRepository` persistence instance and `GeminiClient` AI wrapper.
 Outputs:
-    `VideoSummarizer` class managing MP4 validation, real Gemini Files API summarization, and persistence.
+    `VideoSummarizer` class managing YouTube URL canonicalization, rich Gemini academic
+    summarization, and persistence in `/video_summaries`.
 """
 
 from __future__ import annotations
@@ -22,20 +26,16 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from src.repository.firebase_repository import FirebaseRepository
-from src.services.gemini_client import GeminiClient
-
-ALLOWED_MP4_MIMES = {"video/mp4", "application/mp4", "application/octet-stream", ""}
-MAX_MP4_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB cap for direct MP4 upload
+from src.services.gemini_client import GeminiClient, YOUTUBE_VIDEO_MODES
 
 
 class VideoSummarizer:
     """
     Purpose:
-        Domain service that validates uploaded `.mp4` lecture videos, invokes
-        `GeminiClient` (via the Gemini Files API) to analyze the actual spoken and visual
-        lecture content, and stores structured summaries in Firebase RTDB (`/video_summaries`).
-        Contains zero fake or hardcoded fallback summaries: any missing API key or Gemini API
-        failure raises a clear error surfaced directly to the Lecturer UI.
+        Domain service that validates and canonicalizes public YouTube lecture video URLs,
+        invokes `GeminiClient` (using `VideoMetadata` `content_layers` `"TRANSCRIPT"` / `"AUDIO"`
+        or `fps=0.2`) to analyze the lecture, and stores rich structured academic summaries
+        in Firebase RTDB (`/video_summaries`). Contains zero fake or hardcoded fallback summaries.
     Inputs:
         repository (FirebaseRepository): Firebase RTDB persistence layer.
         gemini_client (GeminiClient): Configured Gemini AI client.
@@ -59,58 +59,18 @@ class VideoSummarizer:
         self.gemini_client = gemini_client
 
     @staticmethod
-    def validate_mp4_upload(
-        filename: str,
-        video_bytes: bytes,
-        content_type: str | None = "video/mp4",
-    ) -> str:
-        """
-        Purpose:
-            Strictly validate that an uploaded lecture video has a `.mp4` extension,
-            an allowed MP4 MIME type, and non-empty binary content.
-        Inputs:
-            filename (str): Original uploaded filename.
-            video_bytes (bytes): Uploaded binary content.
-            content_type (str | None): HTTP multipart MIME content type.
-        Outputs:
-            str: Sanitized filename. Raises `ValueError` for unsupported formats or empty files.
-        """
-        clean_name = (filename or "").strip()
-        if not clean_name.lower().endswith(".mp4"):
-            raise ValueError(
-                "Unsupported video format. Only MP4 (.mp4) lecture video files are accepted."
-            )
-
-        clean_mime = (content_type or "").split(";")[0].strip().lower()
-        if clean_mime not in ALLOWED_MP4_MIMES:
-            raise ValueError(
-                f"Unsupported MIME type '{clean_mime}'. Only MP4 (video/mp4) files are accepted."
-            )
-
-        if not video_bytes or len(video_bytes) == 0:
-            raise ValueError("Uploaded MP4 video file is empty.")
-
-        if len(video_bytes) > MAX_MP4_UPLOAD_BYTES:
-            size_mb = len(video_bytes) / (1024 * 1024)
-            raise ValueError(
-                f"MP4 file ({size_mb:.1f} MB) exceeds the 20 MB upload limit. "
-                "For longer recordings, please use the YouTube URL option or upload an MP4 clip <= 20 MB."
-            )
-
-        return clean_name
-
-    @staticmethod
     def validate_youtube_url(youtube_url: str) -> str:
         """
         Purpose:
-            Validate a public YouTube URL (`youtube.com/watch?v=...`, `youtu.be/...`,
-            `youtube.com/shorts/...`, `youtube.com/live/...`, `youtube.com/embed/...`)
-            and normalize it to `https://www.youtube.com/watch?v=<video_id>`.
+            Validate a public YouTube URL (`youtube.com/watch?v=...&list=...&index=1`,
+            `youtu.be/...`, `youtube.com/shorts/...`, `youtube.com/live/...`,
+            `youtube.com/embed/...`), strip all playlist/timestamp query parameters, and
+            normalize it strictly to `https://www.youtube.com/watch?v=<video_id>`.
         Inputs:
             youtube_url (str): Raw YouTube URL submitted by the Lecturer.
         Outputs:
             str: Canonical `https://www.youtube.com/watch?v=<video_id>` URL.
-            Raises `ValueError` if the URL is not a valid YouTube video link.
+            Raises `ValueError` if the URL is empty or not a valid YouTube video link.
         """
         clean = (youtube_url or "").strip()
         if not clean:
@@ -135,7 +95,12 @@ class VideoSummarizer:
                 v_list = qs.get("v", [])
                 if v_list:
                     video_id = v_list[0]
-            elif len(path_parts) >= 2 and path_parts[0] in {"shorts", "embed", "live", "v"}:
+            elif len(path_parts) >= 2 and path_parts[0] in {
+                "shorts",
+                "embed",
+                "live",
+                "v",
+            }:
                 video_id = path_parts[1]
 
         if not video_id or not re.match(r"^[A-Za-z0-9_-]{6,20}$", video_id):
@@ -148,18 +113,17 @@ class VideoSummarizer:
 
     @staticmethod
     def _build_prompt(
-        filename: str, lesson_tag: str, lecturer_notes: str, size_kb: float
+        canonical_url: str, lesson_tag: str, lecturer_notes: str, video_mode: str = "transcript"
     ) -> str:
         """
         Purpose:
-            Construct the structured Gemini instruction prompt requesting an accurate,
-            content-faithful English summary of the actual spoken audio and visual slides
-            in the uploaded MP4 lecture recording.
+            Construct the structured Gemini instruction prompt requesting a thorough,
+            content-faithful English academic lecture recap from the YouTube lecture video.
         Inputs:
-            filename (str): Uploaded MP4 filename.
+            canonical_url (str): Canonical YouTube URL (`https://www.youtube.com/watch?v=...`).
             lesson_tag (str): Lesson tag (e.g., `"Lesson 2"`).
             lecturer_notes (str): Optional context notes provided by the lecturer.
-            size_kb (float): Video size in kilobytes.
+            video_mode (str): Active analysis mode (`"transcript"`, `"audio"`, `"full_video"`).
         Outputs:
             str: Prompt string for `GeminiClient`.
         """
@@ -170,87 +134,114 @@ class VideoSummarizer:
         )
         return (
             "You are an expert university AI Teaching Assistant. Carefully analyze the ACTUAL "
-            "spoken audio, slides, code, mathematical proofs, and visual demonstrations inside "
-            "this uploaded MP4 lecture recording. Even if the lecturer speaks in Hebrew or another "
-            "language, write your entire output in clear, accurate English based strictly on the real "
-            "subject matter taught in the video. Never invent topics that are not in the video.\n"
+            "content taught in this YouTube lecture recording. Even if the lecturer speaks in Hebrew "
+            "or another language, write your entire output in clear, accurate English based strictly "
+            "on the real subject matter, definitions, examples, and proofs taught in the video. "
+            "Never invent generic filler topics that are not in the video.\n"
             "Return ONLY a valid JSON object with these exact keys:\n"
-            '- "executive_summary": string (2-4 crisp sentences summarizing what was actually taught in this video)\n'
-            '- "key_topics": list of 3-6 specific topics, algorithms, or concepts covered in the video\n'
+            '- "executive_summary": string (2-4 crisp sentences serving as a quick TL;DR headline recap of what was taught)\n'
+            '- "detailed_overview": string (1-2 cohesive, detailed academic paragraphs separated by "\\n\\n" explaining what actually happened in the lecture — the main storyline, how concepts connected step-by-step, and specific examples, proofs, or arguments discussed)\n'
+            '- "key_concepts": list of 3-6 objects, each with exact keys {"term": "Core term, theorem, formula, or algorithm name", "explanation": "Clear 1-2 sentence explanation of how it was defined or applied in the lecture"}\n'
+            '- "key_topics": list of 3-6 specific topics, algorithms, or themes covered in the video\n'
             '- "core_takeaways": list of 3-5 concrete student learning takeaways from the lecture\n'
+            '- "study_questions": list of 2-3 concise self-check or exam-style review questions based directly on the lecture content\n'
             '- "action_items": list of 2-4 actionable practice steps or review tasks for students based on the lecture\n'
             '- "delivery_insights": object with keys "pacing", "clarity", "audio_quality", '
-            'and "overall_rating" ("Excellent" | "Good" | "Needs Attention") evaluating the lecturer\'s actual delivery in the recording.\n'
-            f"Recording filename: '{filename}' ({size_kb:.1f} KB), Lesson Tag: '{lesson_tag}'.{notes_clause}"
+            'and "overall_rating" ("Excellent" | "Good" | "Needs Attention") evaluating the lecturer\'s delivery.\n'
+            f"YouTube Lecture URL: '{canonical_url}', Analysis Mode: '{video_mode}', Lesson Tag: '{lesson_tag}'.{notes_clause}"
         )
+
+    @staticmethod
+    def _normalize_key_concepts(raw_concepts: Any) -> list[dict[str, str]]:
+        """
+        Purpose:
+            Normalize `key_concepts` from Gemini JSON (or older records) into a clean list
+            of `{"term": str, "explanation": str}` dictionaries.
+        Inputs:
+            raw_concepts (Any): Raw `key_concepts` field from Gemini output or Firebase record.
+        Outputs:
+            list[dict[str, str]]: Sanitized list of concept dictionaries.
+        """
+        if not isinstance(raw_concepts, list):
+            return []
+        normalized: list[dict[str, str]] = []
+        for item in raw_concepts:
+            if isinstance(item, dict):
+                term = str(
+                    item.get("term")
+                    or item.get("concept")
+                    or item.get("name")
+                    or ""
+                ).strip()
+                explanation = str(
+                    item.get("explanation")
+                    or item.get("definition")
+                    or item.get("description")
+                    or ""
+                ).strip()
+                if term or explanation:
+                    normalized.append(
+                        {
+                            "term": term or "Concept",
+                            "explanation": explanation,
+                        }
+                    )
+            elif isinstance(item, str) and item.strip():
+                parts = item.split(":", 1)
+                if len(parts) == 2:
+                    normalized.append(
+                        {"term": parts[0].strip(), "explanation": parts[1].strip()}
+                    )
+                else:
+                    normalized.append({"term": "Key Concept", "explanation": item.strip()})
+        return normalized
 
     def summarize_video(
         self,
-        filename: str = "",
-        video_bytes: bytes = b"",
-        content_type: str | None = "video/mp4",
+        youtube_url: str,
         lesson_tag: str = "Lesson 1",
         lecturer_notes: str = "",
-        youtube_url: str | None = None,
+        video_mode: str = "transcript",
         gemini_api_key: str | None = None,
         gemini_model_id: str | None = None,
     ) -> dict[str, Any]:
         """
         Purpose:
-            Validate and analyze either a public YouTube URL (passed directly to Gemini via
-            `Part.from_uri(file_uri=youtube_url, mime_type="video/mp4")`) OR an uploaded `.mp4`
-            lecture file (`<= 20 MB`, uploaded via the Gemini Files API / Vertex inline part),
-            and persist the structured summary in Firebase RTDB under `/video_summaries/{id}`.
+            Validate and canonicalize a public YouTube lecture URL, analyze it via `GeminiClient`
+            using the selected `video_mode` (`"transcript"` default, `"audio"`, or `"full_video"`),
+            and persist the rich structured academic summary in Firebase RTDB under
+            `/video_summaries/{id}`.
         Inputs:
-            filename (str): Uploaded `.mp4` filename (when uploading a file).
-            video_bytes (bytes): Binary MP4 content (when uploading a file).
-            content_type (str | None): Multipart MIME type.
+            youtube_url (str): Public YouTube URL to analyze.
             lesson_tag (str): Associated lesson tag (e.g., `"Lesson 1"`).
             lecturer_notes (str): Optional context notes from the lecturer.
-            youtube_url (str | None): Optional public YouTube URL to analyze directly.
+            video_mode (str): YouTube analysis mode (`"transcript"`, `"audio"`, `"full_video"`).
             gemini_api_key (str | None): Optional BYOK API key override from request header.
             gemini_model_id (str | None): Optional BYOK model ID override from request header.
         Outputs:
             dict[str, Any]: Persisted structured lecture video summary record.
-            Raises `ValueError` for invalid inputs or `RuntimeError` if Gemini fails.
+            Raises `ValueError` for invalid YouTube URLs or `RuntimeError` if Gemini fails.
         """
         clean_tag = (lesson_tag or "Lesson 1").strip() or "Lesson 1"
+        clean_mode = (video_mode or "transcript").strip().lower()
+        if clean_mode not in YOUTUBE_VIDEO_MODES:
+            clean_mode = "transcript"
 
-        if youtube_url and youtube_url.strip():
-            canonical_yt = self.validate_youtube_url(youtube_url.strip())
-            clean_filename = canonical_yt
-            size_kb = 0.0
-            source_type = "youtube"
-            prompt = self._build_prompt(
-                filename=canonical_yt,
-                lesson_tag=clean_tag,
-                lecturer_notes=lecturer_notes,
-                size_kb=size_kb,
-            )
-            generated = self.gemini_client.generate_structured_json(
-                prompt=prompt,
-                file_uri=canonical_yt,
-                mime_type="video/mp4",
-                api_key_override=gemini_api_key,
-                model_id_override=gemini_model_id,
-            )
-        else:
-            clean_filename = self.validate_mp4_upload(filename, video_bytes, content_type)
-            size_kb = round(len(video_bytes) / 1024.0, 2)
-            source_type = "mp4"
-            prompt = self._build_prompt(
-                filename=clean_filename,
-                lesson_tag=clean_tag,
-                lecturer_notes=lecturer_notes,
-                size_kb=size_kb,
-            )
-            generated = self.gemini_client.generate_structured_json(
-                prompt=prompt,
-                media_bytes=video_bytes,
-                mime_type="video/mp4",
-                api_key_override=gemini_api_key,
-                model_id_override=gemini_model_id,
-            )
+        canonical_yt = self.validate_youtube_url(youtube_url)
+        prompt = self._build_prompt(
+            canonical_url=canonical_yt,
+            lesson_tag=clean_tag,
+            lecturer_notes=lecturer_notes,
+            video_mode=clean_mode,
+        )
+        generated = self.gemini_client.generate_structured_json(
+            prompt=prompt,
+            file_uri=canonical_yt,
+            mime_type="video/mp4",
+            video_mode=clean_mode,
+            api_key_override=gemini_api_key,
+            model_id_override=gemini_model_id,
+        )
 
         now_ts = int(time.time())
         summary_id = f"vid_{now_ts}_{secrets.token_hex(4)}"
@@ -264,28 +255,65 @@ class VideoSummarizer:
             or generated.get("summary")
             or ""
         ).strip()
-        takeaways = list(
-            generated.get("core_takeaways")
-            or generated.get("takeaways")
-            or []
-        )
+        detailed_overview = str(
+            generated.get("detailed_overview")
+            or generated.get("walkthrough")
+            or ""
+        ).strip()
+        key_concepts = self._normalize_key_concepts(generated.get("key_concepts"))
+        takeaways = [
+            str(t).strip()
+            for t in (
+                generated.get("core_takeaways")
+                or generated.get("takeaways")
+                or []
+            )
+            if str(t).strip()
+        ]
+        study_questions = [
+            str(q).strip()
+            for q in (
+                generated.get("study_questions")
+                or generated.get("review_questions")
+                or []
+            )
+            if str(q).strip()
+        ]
+        key_topics = [
+            str(t).strip()
+            for t in (generated.get("key_topics") or [])
+            if str(t).strip()
+        ]
+        action_items = [
+            str(a).strip()
+            for a in (generated.get("action_items") or [])
+            if str(a).strip()
+        ]
 
         record: dict[str, Any] = {
             "summary_id": summary_id,
-            "filename": clean_filename,
-            "source_type": source_type,
-            "youtube_url": clean_filename if source_type == "youtube" else None,
-            "file_size_kb": size_kb,
+            "filename": canonical_yt,
+            "source_type": "youtube",
+            "youtube_url": canonical_yt,
+            "video_mode": str(generated.get("video_mode_used") or clean_mode),
+            "file_size_kb": 0.0,
             "lesson_tag": clean_tag,
             "lecturer_notes": (lecturer_notes or "").strip(),
             "executive_summary": exec_summary,
-            "key_topics": list(generated.get("key_topics", [])),
+            "detailed_overview": detailed_overview,
+            "key_concepts": key_concepts,
+            "key_topics": key_topics,
             "core_takeaways": takeaways,
-            "action_items": list(generated.get("action_items", [])),
+            "study_questions": study_questions,
+            "action_items": action_items,
             "delivery_insights": {
                 "pacing": str(delivery.get("pacing", "Balanced lecture pacing.")),
-                "clarity": str(delivery.get("clarity", "Clear explanations and examples.")),
-                "audio_quality": str(delivery.get("audio_quality", "Clear audio track.")),
+                "clarity": str(
+                    delivery.get("clarity", "Clear explanations and examples.")
+                ),
+                "audio_quality": str(
+                    delivery.get("audio_quality", "Clear audio track.")
+                ),
                 "overall_rating": str(delivery.get("overall_rating", "Excellent")),
             },
             "model_used": str(generated.get("model_used", "gemini-3.5-flash-lite")),
@@ -299,7 +327,9 @@ class VideoSummarizer:
         """
         Purpose:
             Retrieve all stored lecture video summaries from `/video_summaries`,
-            ordered newest-first.
+            ordered newest-first, ensuring backwards-compatible default fields
+            (`detailed_overview`, `key_concepts`, `study_questions`, `video_mode`)
+            for older saved records.
         Inputs:
             None.
         Outputs:
@@ -308,9 +338,22 @@ class VideoSummarizer:
         raw_all = self.repository.get("/video_summaries")
         if not isinstance(raw_all, dict):
             return []
-        items = [
-            v for v in raw_all.values() if isinstance(v, dict) and "summary_id" in v
-        ]
+        items: list[dict[str, Any]] = []
+        for sid, v in raw_all.items():
+            if not isinstance(v, dict):
+                continue
+            item = dict(v)
+            item["summary_id"] = str(item.get("summary_id") or sid)
+            item.setdefault("detailed_overview", "")
+            item["key_concepts"] = self._normalize_key_concepts(
+                item.get("key_concepts")
+            )
+            item.setdefault("study_questions", [])
+            item.setdefault("key_topics", [])
+            item.setdefault("core_takeaways", [])
+            item.setdefault("action_items", [])
+            item.setdefault("video_mode", "transcript")
+            items.append(item)
         items.sort(key=lambda s: int(s.get("created_at", 0)), reverse=True)
         return items
 
@@ -325,8 +368,6 @@ class VideoSummarizer:
             dict[str, Any]: Deletion confirmation dictionary (`summary_id`, `status="deleted"`).
             Raises `ValueError` if `summary_id` is empty or does not exist.
         """
-        import re
-
         clean_id = re.sub(r"[.$#\[\]/]", "_", (summary_id or "").strip())
         if not clean_id:
             raise ValueError("summary_id is required.")

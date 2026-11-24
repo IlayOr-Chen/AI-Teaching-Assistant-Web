@@ -2,17 +2,22 @@
 Purpose:
     Comprehensive unit and HTTP integration tests for Features 4 & 5:
     - `GeminiClient` (Firebase RTDB `/settings/gemini`, masked API key, free-text model IDs
-      defaulting to `gemini-3.5-flash-lite`, support for both AI Studio `AIza...` and Vertex
-      AI Express `AQ....` keys, strict error raising when API key is missing, Gemini Files
-      API upload + status polling + cleanup for `AIza...` MP4s, inline `Part.from_bytes`
-      for `AQ....` MP4s <= 20 MB, and direct `Part.from_uri` for YouTube URLs)
-    - `VideoSummarizer` (public YouTube URL validation & normalization, strict `.mp4`
-      extension/MIME/20 MB validation, structured teaching and delivery insights summary)
+      defaulting to `gemini-3.5-flash-lite`, support for both AI Studio `AIza...` and `AQ....`
+      keys via the standard Developer API, explicit `Clear Key` via `PUT`/`DELETE` without
+      falling back to `.env`, strict error raising when API key is missing, YouTube
+      `VideoMetadata(content_layers=...)` modes (`"transcript"`, `"audio"`, `"full_video"`)
+      with automatic `TRANSCRIPT -> AUDIO` fallback, and automatic retry + model fallback on
+      transient `503 UNAVAILABLE` / `429 RESOURCE_EXHAUSTED` spikes)
+    - `VideoSummarizer` (YouTube-only public URL validation & canonicalization stripping
+      `&list=...`/`&index=...` playlist params, rich academic summary schema including
+      `detailed_overview`, `key_concepts`, `study_questions`, and backwards-compatible
+      handling of older stored summaries)
     - `HomeworkReviewer` (multi-format `.pdf`, `.docx`, `.txt`, `.py`, `.zip` extraction,
       Hebrew/sparse PDF resilience without 500, public GitHub repository URL zipball
       ingestion, per-student BYOK `X-Gemini-Api-Key` / `400` guard, Gated Release Rule
-      before deadline / "End Submission Now", Concise Review Card + Dedicated Peer
-      Comparison Column, and First-Submission Edge Case notice when `total_submissions == 1`).
+      before deadline / "End Submission Now", regression test for `end_submission_now` on
+      legacy Firebase records lacking an embedded `"assignment_id"` key, Concise Review Card +
+      Dedicated Peer Comparison Column, and First-Submission Edge Case notice).
 Inputs:
     In-memory `FirebaseRepository`, test-only mock Gemini transports/SDK stubs, and `TestClient`.
 Outputs:
@@ -22,8 +27,6 @@ Outputs:
 from __future__ import annotations
 
 import io
-from pathlib import Path
-import tempfile
 import time
 from typing import Any
 import zipfile
@@ -35,7 +38,7 @@ from fastapi.testclient import TestClient
 from src.config import AppConfig
 from src.main import create_app
 from src.repository.firebase_repository import FirebaseRepository
-from src.services.gemini_client import GeminiClient
+from src.services.gemini_client import GeminiClient, GeminiHighDemandError
 from src.services.homework_reviewer import (
     FIRST_SUBMISSION_NOTICE,
     HomeworkReviewer,
@@ -49,7 +52,7 @@ def _test_gemini_transport(**kwargs: Any) -> dict[str, Any]:
         Test-only mock transport injected strictly inside `tests/` so unit tests verify
         prompt structure and JSON parsing without hitting live external Gemini quota.
     Inputs:
-        **kwargs (Any): `prompt`, `model_id`, `api_key`, `media_bytes`, `mime_type`.
+        **kwargs (Any): `prompt`, `model_id`, `api_key`, `media_bytes`, `mime_type`, `file_uri`.
     Outputs:
         dict[str, Any]: Structured test JSON response matching the requested schema.
     """
@@ -57,11 +60,33 @@ def _test_gemini_transport(**kwargs: Any) -> dict[str, Any]:
     if "delivery_insights" in prompt:
         return {
             "executive_summary": "Analyzed lecture video covering graph algorithms and dynamic programming.",
+            "detailed_overview": (
+                "The lecture opened by motivating shortest-path problems on weighted directed graphs "
+                "and contrasting unweighted Breadth-First Search (BFS) with Dijkstra's greedy relaxation "
+                "strategy using a min-priority queue.\n\n"
+                "In the second half, the lecturer walked through a concrete dry-run counterexample with "
+                "negative edge weights and transitioned into Bellman-Ford and Dynamic Programming optimal "
+                "substructure principles."
+            ),
+            "key_concepts": [
+                {
+                    "term": "Edge Relaxation",
+                    "explanation": "Testing whether going through vertex u improves the shortest known distance to v.",
+                },
+                {
+                    "term": "Optimal Substructure",
+                    "explanation": "Subpaths of shortest paths are themselves shortest paths, enabling DP recurrences.",
+                },
+            ],
             "key_topics": ["Breadth-First Search", "Dijkstra Shortest Path", "Dynamic Programming"],
             "core_takeaways": [
                 "BFS finds shortest paths in unweighted graphs in O(V + E).",
                 "Dijkstra requires non-negative edge weights.",
                 "Memoization avoids exponential recomputation.",
+            ],
+            "study_questions": [
+                "Why does Dijkstra's algorithm fail when a graph contains negative-weight edges?",
+                "How does memoization reduce time complexity in overlapping subproblems?",
             ],
             "action_items": [
                 "Solve practice set 5 on shortest-path reductions.",
@@ -176,16 +201,17 @@ def _build_minimal_docx_bytes(paragraph_text: str) -> bytes:
     return buf.getvalue()
 
 
-def test_gemini_client_settings_masking_and_custom_model_id(
+def test_gemini_client_settings_masking_clear_key_and_custom_model_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
     Purpose:
         Verify that `GeminiClient` defaults to `gemini-3.5-flash-lite`, persists custom
-        free-text model IDs (e.g. `gemini-3.5-flash-lite`, `gemini-3.5-flash`, `gemini-2.5-flash`),
-        masks both AI Studio (`AIza...`) and Vertex AI Express (`AQ....`) keys, selects
-        `vertexai=True` strictly for `AQ.` keys, clears keys cleanly, and raises `RuntimeError`
-        (never a fake fallback) when the API key is missing.
+        free-text model IDs, masks both `AIza...` and `AQ....` keys, always uses the
+        standard Developer API client (never `vertexai=True` by default), genuinely clears
+        the stored key (setting `has_key=False` / `has_api_key=False` and `masked_key=None`
+        even if `.env` `gemini_api_key` was set), and raises `RuntimeError` when the API
+        key is missing.
     Inputs:
         monkeypatch (pytest.MonkeyPatch): Pytest monkeypatch fixture.
     Outputs:
@@ -193,14 +219,17 @@ def test_gemini_client_settings_masking_and_custom_model_id(
     """
     from google import genai
 
-    cfg = AppConfig(use_mock_firebase=True, gemini_api_key="")
+    # Even if an env fallback key exists on AppConfig, clearing the key in UI must NOT fall back to it!
+    cfg = AppConfig(use_mock_firebase=True, gemini_api_key="AIzaEnvFallbackShouldNotStayActive")
     repo = FirebaseRepository(use_mock=True)
     client = GeminiClient(repository=repo, config=cfg)
 
-    initial = client.get_settings()
-    assert initial["model_id"] == "gemini-3.5-flash-lite"
-    assert initial["has_api_key"] is False
-    assert initial["masked_api_key"] == ""
+    # Clear key explicitly -> must set has_key=False & masked_key=None (no .env fallback)
+    cleared_initial = client.update_settings(api_key="")
+    assert cleared_initial["has_api_key"] is False
+    assert cleared_initial["has_key"] is False
+    assert cleared_initial["masked_api_key"] == ""
+    assert cleared_initial["masked_key"] is None
 
     # Missing API key without test transport MUST raise RuntimeError, never fake fallback content
     with pytest.raises(RuntimeError, match="Gemini API Key is missing"):
@@ -213,26 +242,36 @@ def test_gemini_client_settings_masking_and_custom_model_id(
     )
     assert updated["model_id"] == "gemini-3.5-flash"
     assert updated["has_api_key"] is True
+    assert updated["has_key"] is True
     assert updated["masked_api_key"] == "AIza...4321"
+    assert updated["masked_key"] == "AIza...4321"
     assert "AIzaSyTestSecretKey987654321" not in str(updated)
 
     # Empty model_id must be rejected
     with pytest.raises(ValueError, match="cannot be empty"):
         client.update_settings(model_id="   ")
 
-    # Supports Vertex AI Express (AQ....) keys & clearing stored key
-    vertex_updated = client.update_settings(
+    # Supports AQ.... keys & clearing stored key
+    aq_updated = client.update_settings(
         api_key="AQ.VertexExpressDemo987654321",
         model_id="gemini-3.5-flash-lite",
     )
-    assert vertex_updated["has_api_key"] is True
-    assert vertex_updated["masked_api_key"] == "AQ.V...4321"
+    assert aq_updated["has_api_key"] is True
+    assert aq_updated["has_key"] is True
+    assert aq_updated["masked_api_key"] == "AQ.V...4321"
 
     cleared = client.update_settings(api_key="")
     assert cleared["has_api_key"] is False
+    assert cleared["has_key"] is False
     assert cleared["masked_api_key"] == ""
+    assert cleared["masked_key"] is None
 
-    # Verify _build_genai_client routes AQ. to vertexai=True and AIza to Developer client
+    # Subsequent model_id-only update after clearing key must keep key cleared
+    still_cleared = client.update_settings(model_id="gemini-2.5-flash")
+    assert still_cleared["has_key"] is False
+    assert still_cleared["model_id"] == "gemini-2.5-flash"
+
+    # Verify _build_genai_client always uses standard Developer API (no vertexai=True)
     client_calls: list[dict[str, Any]] = []
 
     class RecordingClient:
@@ -245,91 +284,79 @@ def test_gemini_client_settings_masking_and_custom_model_id(
     assert client_calls[0]["api_key"] == "AIzaSyTestKey123"
     assert "vertexai" not in client_calls[0]
     assert client_calls[0]["http_options"].timeout == 75_000
-    assert client_calls[1]["vertexai"] is True
     assert client_calls[1]["api_key"] == "AQ.AbCdEf123456"
+    assert "vertexai" not in client_calls[1]
     assert client_calls[1]["http_options"].timeout == 75_000
 
 
-def test_gemini_files_api_large_mp4_upload_polling_and_cleanup(
+def test_youtube_content_layers_modes_transcript_to_audio_fallback_and_503_model_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
     Purpose:
         Verify that `GeminiClient.generate_structured_json`:
-        1) For AI Studio (`AIza...`), uploads MP4 payloads via `client.files.upload` using
-           an ASCII-safe temp path (handling Hebrew filenames), polls `PROCESSING -> ACTIVE`,
-           generates JSON, and cleans up remote + local temp files in `finally:`.
-        2) For Vertex AI Express (`AQ....`), uses inline `Part.from_bytes` without calling `files.upload`.
-        3) For YouTube URLs, passes `types.Part.from_uri(file_uri=..., mime_type="video/mp4")`.
+        1) Uses `VideoMetadata(content_layers=["TRANSCRIPT"])` in `"transcript"` mode,
+           `VideoMetadata(content_layers=["AUDIO"])` in `"audio"` mode, and
+           `VideoMetadata(fps=0.2)` in `"full_video"` mode.
+        2) Automatically falls back from `"transcript"` to `"audio"` when the video has no
+           transcript or the `TRANSCRIPT` layer raises an error.
+        3) Automatically retries once and falls back across `[selected_model, "gemini-3.5-flash",
+           "gemini-2.5-flash", "gemini-3.5-flash-lite"]` on transient `503 UNAVAILABLE` / `429`
+           errors, and raises `GeminiHighDemandError` when all models are overloaded.
     Inputs:
         monkeypatch (pytest.MonkeyPatch): Pytest monkeypatch fixture.
     Outputs:
         None.
     """
     from google import genai
-    from google.genai import types
 
-    events: dict[str, Any] = {
-        "uploaded_temp_path": None,
-        "poll_calls": 0,
-        "deleted_remote_name": None,
-        "model_called": None,
-        "vertex_calls": [],
-        "contents_seen": [],
-    }
+    calls: list[dict[str, Any]] = []
+    scenario = {"mode": "normal"}
 
-    class FakeState:
-        def __init__(self, name: str) -> None:
-            self.name = name
-
-    class FakeUploadedFile:
-        def __init__(self, name: str, state_name: str) -> None:
-            self.name = name
-            self.state = FakeState(state_name)
-
-    class FakeFilesAPI:
-        def __init__(self, is_vertex: bool) -> None:
-            self._is_vertex = is_vertex
-
-        def upload(self, *, file: str) -> FakeUploadedFile:
-            if self._is_vertex:
-                raise ValueError("This method is only supported in the Gemini Developer client.")
-            events["uploaded_temp_path"] = file
-            assert file.isascii()
-            assert Path(file).is_file()
-            # Must write inside OS temp directory (never inside watched project source dirs)
-            assert Path(file).resolve().parent == Path(tempfile.gettempdir()).resolve()
-            return FakeUploadedFile("files/lec_hebrew_123", "PROCESSING")
-
-        def get(self, *, name: str) -> FakeUploadedFile:
-            events["poll_calls"] += 1
-            return FakeUploadedFile(name, "ACTIVE")
-
-        def delete(self, *, name: str) -> None:
-            events["deleted_remote_name"] = name
+    class FakeResp:
+        text = (
+            '{"executive_summary": "Recitation 5 on Algorithms 1 (BFS & DFS).", '
+            '"detailed_overview": "Paragraph 1 explaining BFS queue traversal.\\n\\nParagraph 2 explaining DFS recursion.", '
+            '"key_concepts": [{"term": "BFS", "explanation": "Level-order graph traversal using a FIFO queue."}], '
+            '"key_topics": ["BFS", "DFS", "Topological Sort"], '
+            '"core_takeaways": ["BFS uses a queue", "DFS uses a stack/recursion"], '
+            '"study_questions": ["What is the time complexity of BFS?"], '
+            '"action_items": ["Complete HW 5"], '
+            '"delivery_insights": {"pacing": "Good", "clarity": "Clear", "audio_quality": "Good", "overall_rating": "Excellent"}}'
+        )
 
     class FakeModelsAPI:
         def generate_content(self, *, model: str, contents: list[Any], config: Any) -> Any:
-            events["model_called"] = model
-            events["contents_seen"].append(contents)
+            first_part = contents[0]
+            vm = getattr(first_part, "video_metadata", None)
+            layers = getattr(vm, "content_layers", None) if vm else None
+            fps_val = getattr(vm, "fps", None) if vm else None
+            layer_names = [getattr(x, "value", str(x)) for x in layers] if layers else None
+            calls.append(
+                {
+                    "model": model,
+                    "layers": layer_names,
+                    "fps": fps_val,
+                    "file_uri": getattr(getattr(first_part, "file_data", None), "file_uri", None),
+                }
+            )
 
-            class Resp:
-                text = (
-                    '{"executive_summary": "Recitation 5 on Algorithms 1 (BFS & DFS).", '
-                    '"key_topics": ["BFS", "DFS", "Topological Sort"], '
-                    '"core_takeaways": ["BFS uses a queue", "DFS uses a stack/recursion", "DAG topological order"], '
-                    '"action_items": ["Complete HW 5", "Review graph complexity"], '
-                    '"delivery_insights": {"pacing": "Good", "clarity": "Clear", "audio_quality": "Good", "overall_rating": "Excellent"}}'
-                )
+            if scenario["mode"] == "no_transcript" and layer_names == ["TRANSCRIPT"]:
+                raise ValueError("400 INVALID_ARGUMENT: No transcript available for this video.")
 
-            return Resp()
+            if scenario["mode"] == "primary_503_then_fallback_ok":
+                if model == "gemini-3.5-flash-lite":
+                    raise RuntimeError("503 UNAVAILABLE: The model is overloaded due to high demand.")
+                return FakeResp()
+
+            if scenario["mode"] == "all_503":
+                raise RuntimeError("503 UNAVAILABLE: High demand across all models.")
+
+            return FakeResp()
 
     class FakeGenAIClient:
-        def __init__(self, *, api_key: str, vertexai: bool = False) -> None:
+        def __init__(self, *, api_key: str, http_options: Any = None) -> None:
             self.api_key = api_key
-            self.vertexai = vertexai
-            events["vertex_calls"].append(vertexai)
-            self.files = FakeFilesAPI(vertexai)
             self.models = FakeModelsAPI()
 
     monkeypatch.setattr(genai, "Client", FakeGenAIClient)
@@ -340,50 +367,74 @@ def test_gemini_files_api_large_mp4_upload_polling_and_cleanup(
     gemini = GeminiClient(repository=repo, config=cfg)
     summarizer = VideoSummarizer(repository=repo, gemini_client=gemini)
 
-    summary = summarizer.summarize_video(
-        filename="אלגוריתמים 1 תרגול 5 - שני שוב.mp4",
-        video_bytes=b"\x00\x00\x00\x18ftypmp42" + (b"v" * 2048),
-        content_type="video/mp4",
+    # 1. Default mode ("transcript") strips playlist params & passes content_layers=["TRANSCRIPT"]
+    res_tx = summarizer.summarize_video(
+        youtube_url="https://www.youtube.com/watch?v=8UY3LQI529o&list=PLW3u28&index=1",
         lesson_tag="Lesson 5",
     )
+    assert res_tx["youtube_url"] == "https://www.youtube.com/watch?v=8UY3LQI529o"
+    assert res_tx["video_mode"] == "transcript"
+    assert calls[-1]["file_uri"] == "https://www.youtube.com/watch?v=8UY3LQI529o"
+    assert calls[-1]["layers"] == ["TRANSCRIPT"]
 
-    assert summary["filename"] == "אלגוריתמים 1 תרגול 5 - שני שוב.mp4"
-    assert "Algorithms 1" in summary["executive_summary"]
-    assert summary["model_used"] == "gemini-3.5-flash-lite"
-    assert summary["provider"] == "gemini_live"
-    assert events["poll_calls"] == 1
-    assert events["deleted_remote_name"] == "files/lec_hebrew_123"
-    assert events["uploaded_temp_path"] is not None
-    assert not Path(events["uploaded_temp_path"]).exists()
-
-    # Vertex AI Express (AQ.) uses inline Part.from_bytes for MP4 <= 20 MB instead of files.upload()
-    vertex_summary = summarizer.summarize_video(
-        filename="vertex_clip.mp4",
-        video_bytes=b"\x00\x00\x00\x18ftypmp42" + (b"x" * 1024),
-        content_type="video/mp4",
-        gemini_api_key="AQ.VertexExpressKey999",
+    # 2. Explicit "audio" and "full_video" modes
+    res_aud = summarizer.summarize_video(
+        youtube_url="https://youtu.be/8UY3LQI529o",
+        video_mode="audio",
     )
-    assert vertex_summary["provider"] == "gemini_live"
-    assert events["vertex_calls"][-1] is True
+    assert res_aud["video_mode"] == "audio"
+    assert calls[-1]["layers"] == ["AUDIO"]
 
-    # YouTube URL uses types.Part.from_uri with video/mp4 MIME type
-    yt_summary = summarizer.summarize_video(
-        youtube_url="https://youtu.be/dQw4w9WgXcQ",
-        gemini_api_key="AQ.VertexExpressKey999",
+    res_full = summarizer.summarize_video(
+        youtube_url="https://youtu.be/8UY3LQI529o",
+        video_mode="full_video",
     )
-    assert yt_summary["source_type"] == "youtube"
-    yt_first_part = events["contents_seen"][-1][0]
-    assert isinstance(yt_first_part, types.Part)
-    assert yt_first_part.file_data is not None
-    assert "youtube.com/watch?v=dQw4w9WgXcQ" in (yt_first_part.file_data.file_uri or "")
+    assert res_full["video_mode"] == "full_video"
+    assert calls[-1]["fps"] == 0.2
+
+    # 3. Automatic fallback from TRANSCRIPT -> AUDIO when video has no transcript
+    calls.clear()
+    scenario["mode"] = "no_transcript"
+    res_fallback_audio = summarizer.summarize_video(
+        youtube_url="https://www.youtube.com/watch?v=8UY3LQI529o",
+        video_mode="transcript",
+    )
+    assert [c["layers"] for c in calls] == [["TRANSCRIPT"], ["AUDIO"]]
+    assert res_fallback_audio["video_mode"] == "audio"
+
+    # 4. Automatic 503 retry + model fallback (gemini-3.5-flash-lite fails 2x -> gemini-3.5-flash succeeds)
+    calls.clear()
+    scenario["mode"] = "primary_503_then_fallback_ok"
+    res_503_recovered = summarizer.summarize_video(
+        youtube_url="https://www.youtube.com/watch?v=8UY3LQI529o",
+        video_mode="audio",
+    )
+    assert [c["model"] for c in calls] == [
+        "gemini-3.5-flash-lite",
+        "gemini-3.5-flash-lite",
+        "gemini-3.5-flash",
+    ]
+    assert res_503_recovered["model_used"] == "gemini-3.5-flash"
+
+    # 5. When all candidate models return 503, raises GeminiHighDemandError with clear 503 detail
+    calls.clear()
+    scenario["mode"] = "all_503"
+    with pytest.raises(GeminiHighDemandError, match="temporarily experiencing high demand"):
+        summarizer.summarize_video(
+            youtube_url="https://www.youtube.com/watch?v=8UY3LQI529o",
+            video_mode="audio",
+        )
 
 
-def test_video_summarizer_strict_mp4_validation_and_structured_summary() -> None:
+def test_video_summarizer_youtube_canonicalization_rich_schema_and_backwards_compat() -> None:
     """
     Purpose:
-        Verify that `VideoSummarizer` strictly accepts `.mp4` files (<= 20 MB) or valid
-        public YouTube URLs, rejects non-MP4 extensions/MIMEs, empty or > 20 MB files,
-        and non-YouTube URLs, and produces structured delivery insights.
+        Verify that `VideoSummarizer`:
+        1) Strictly validates YouTube URLs and strips playlist (`&list=...`, `&index=...`, `&t=...`)
+           query parameters down to `https://www.youtube.com/watch?v=<video_id>`.
+        2) Persists rich academic summary fields (`detailed_overview`, `key_concepts`, `study_questions`).
+        3) Backwards-compatibly normalizes older saved summaries in Firebase RTDB that lack
+           the new fields.
     Inputs:
         None.
     Outputs:
@@ -394,77 +445,79 @@ def test_video_summarizer_strict_mp4_validation_and_structured_summary() -> None
     gemini = GeminiClient(repository=repo, config=cfg, transport=_test_gemini_transport)
     summarizer = VideoSummarizer(repository=repo, gemini_client=gemini)
 
-    # Edge case 1: Non-MP4 file extensions rejected
-    for bad_name in ("lecture.avi", "recording.mov", "zoom_summary.docx", "audio.mp3"):
-        with pytest.raises(ValueError, match="Only MP4"):
-            summarizer.summarize_video(bad_name, b"binary-content", "video/mp4")
-
-    # Edge case 2: Non-MP4 MIME type rejected
-    with pytest.raises(ValueError, match="Unsupported MIME type"):
-        summarizer.summarize_video("lecture.mp4", b"binary-content", "video/quicktime")
-
-    # Edge case 3: Empty MP4 or > 20 MB MP4 rejected
-    with pytest.raises(ValueError, match="empty"):
-        summarizer.summarize_video("lecture.mp4", b"", "video/mp4")
-
-    with pytest.raises(ValueError, match="20 MB"):
-        summarizer.summarize_video(
-            "huge_lecture.mp4", b"x" * (20 * 1024 * 1024 + 1), "video/mp4"
-        )
-
-    # Edge case 4: Invalid YouTube URL rejected & valid YouTube URLs normalized
+    # Edge case 1: Empty or non-YouTube URLs rejected
+    with pytest.raises(ValueError, match="YouTube URL is required"):
+        summarizer.summarize_video(youtube_url="   ")
     with pytest.raises(ValueError, match="Invalid YouTube URL"):
         summarizer.summarize_video(youtube_url="https://vimeo.com/123456")
 
+    # Canonicalization strips playlist & index query params
     assert (
-        VideoSummarizer.validate_youtube_url("https://youtu.be/abc123XYZ")
+        VideoSummarizer.validate_youtube_url(
+            "https://www.youtube.com/watch?v=8UY3LQI529o&list=PLW3u28VuDAHJym6112ef3201&index=1"
+        )
+        == "https://www.youtube.com/watch?v=8UY3LQI529o"
+    )
+    assert (
+        VideoSummarizer.validate_youtube_url("https://youtu.be/abc123XYZ?si=share99&t=45")
         == "https://www.youtube.com/watch?v=abc123XYZ"
     )
     assert (
-        VideoSummarizer.validate_youtube_url("https://www.youtube.com/shorts/short99")
+        VideoSummarizer.validate_youtube_url("https://www.youtube.com/shorts/short99?feature=share")
         == "https://www.youtube.com/watch?v=short99"
     )
 
     yt_res = summarizer.summarize_video(
-        youtube_url="https://www.youtube.com/watch?v=abc123XYZ",
+        youtube_url="https://www.youtube.com/watch?v=8UY3LQI529o&list=PL123&index=3",
         lesson_tag="Lesson 3",
         lecturer_notes="Shortest Paths",
     )
     assert yt_res["source_type"] == "youtube"
-    assert yt_res["youtube_url"] == "https://www.youtube.com/watch?v=abc123XYZ"
+    assert yt_res["youtube_url"] == "https://www.youtube.com/watch?v=8UY3LQI529o"
     assert yt_res["model_used"] == "gemini-3.5-flash-lite"
+    assert "Dijkstra" in yt_res["detailed_overview"]
+    assert len(yt_res["key_concepts"]) == 2
+    assert yt_res["key_concepts"][0]["term"] == "Edge Relaxation"
+    assert len(yt_res["study_questions"]) == 2
+    assert len(yt_res["key_topics"]) >= 3
+    assert len(yt_res["core_takeaways"]) >= 3
+    assert len(yt_res["action_items"]) >= 3
 
-    # Happy case: Valid MP4 upload (<= 20 MB) produces structured summary & delivery insights
-    fake_mp4 = b"\x00\x00\x00\x18ftypmp42" + (b"0" * 4096)
-    summary = summarizer.summarize_video(
-        filename="Ex2_OOP_Lecture.mp4",
-        video_bytes=fake_mp4,
-        content_type="video/mp4",
-        lesson_tag="Lesson 2",
-        lecturer_notes="Graph Algorithms",
+    # Backwards compatibility: insert an older summary record without new fields
+    repo.set(
+        "/video_summaries/vid_legacy_001",
+        {
+            "summary_id": "vid_legacy_001",
+            "filename": "https://www.youtube.com/watch?v=legacy12345",
+            "source_type": "youtube",
+            "lesson_tag": "Lesson 1",
+            "executive_summary": "Legacy summary record.",
+            "key_topics": ["OOP"],
+            "core_takeaways": ["Encapsulation"],
+            "action_items": ["Read chapter 1"],
+            "delivery_insights": {"overall_rating": "Good"},
+            "created_at": 100,
+        },
     )
-    assert summary["filename"] == "Ex2_OOP_Lecture.mp4"
-    assert summary["source_type"] == "mp4"
-    assert summary["lesson_tag"] == "Lesson 2"
-    assert len(summary["key_topics"]) >= 3
-    assert len(summary["core_takeaways"]) >= 3
-    assert len(summary["action_items"]) >= 3
-    assert set(summary["delivery_insights"].keys()) == {
-        "pacing",
-        "clarity",
-        "audio_quality",
-        "overall_rating",
-    }
-    assert len(summarizer.list_summaries()) == 2
+    all_summaries = summarizer.list_summaries()
+    assert len(all_summaries) == 2
+    legacy = next(s for s in all_summaries if s["summary_id"] == "vid_legacy_001")
+    assert legacy["detailed_overview"] == ""
+    assert legacy["key_concepts"] == []
+    assert legacy["study_questions"] == []
+    assert legacy["video_mode"] == "transcript"
 
 
-def test_homework_reviewer_gated_release_and_first_submission_edge_case() -> None:
+def test_homework_reviewer_gated_release_first_submission_and_legacy_end_now_regression() -> None:
     """
     Purpose:
         Verify `HomeworkReviewer` validation, `pypdf` text extraction,
         the Gated Release Rule (withholding review & peer comparison while submissions
-        are open), the one-click "End Submission Now" unlock, and the exact
-        First-Submission Edge Case notice when only 1 student has submitted.
+        are open), the one-click "End Submission Now" unlock, the exact
+        First-Submission Edge Case notice when only 1 student has submitted, and the
+        regression fix ensuring `end_submission_now` and `list_assignments` never raise
+        `KeyError: 'assignment_id'` on older Firebase assignment records lacking an
+        embedded `"assignment_id"` field.
     Inputs:
         None.
     Outputs:
@@ -509,7 +562,6 @@ def test_homework_reviewer_gated_release_and_first_submission_edge_case() -> Non
     )
     assert receipt["page_count"] == 1
     assert receipt["word_count"] >= 10
-    # Gated Release Rule: review and peer_comparison MUST be None while submissions are open
     assert receipt["review_released"] is False
     assert receipt["review"] is None
     assert receipt["peer_comparison"] is None
@@ -536,8 +588,7 @@ def test_homework_reviewer_gated_release_and_first_submission_edge_case() -> Non
             aid, "stu_bob", "Bob Levi", "bob_late.pdf", alice_pdf, now_ts=now + 40
         )
 
-    # Step 4: First-Submission Edge Case — only 1 student submitted, so peer_comparison
-    # must display the exact FIRST_SUBMISSION_NOTICE
+    # Step 4: First-Submission Edge Case — only 1 student submitted
     unlocked_single = reviewer.get_student_review_and_comparison(
         assignment_id=aid,
         student_id="stu_alice",
@@ -550,6 +601,37 @@ def test_homework_reviewer_gated_release_and_first_submission_edge_case() -> Non
     assert unlocked_single["peer_comparison"]["is_first_submission_only"] is True
     assert unlocked_single["peer_comparison"]["total_submissions"] == 1
     assert unlocked_single["peer_comparison"]["notice"] == FIRST_SUBMISSION_NOTICE
+
+    # Step 5: REGRESSION TEST — Legacy Firebase assignment dict WITHOUT embedded "assignment_id"
+    legacy_aid = "hw_legacy_no_embedded_id"
+    repo.set(
+        f"/homework_assignments/{legacy_aid}",
+        {
+            "title": "Legacy Assignment Without Embedded ID",
+            "description": "Created before assignment_id was embedded",
+            "lesson_tag": "Lesson 1",
+            "deadline_ts": now + 7200,
+            "ended_manually": False,
+            "created_at": now,
+            "submissions": {
+                "stu_alice": {
+                    "filename": "alice.pdf",
+                    "word_count": 42,
+                    "submitted_at": now + 5,
+                }
+            },
+        },
+    )
+    listed = reviewer.list_assignments(viewer_id="stu_alice", now_ts=now + 10)
+    legacy_listed = next(a for a in listed if a["assignment_id"] == legacy_aid)
+    assert legacy_listed["title"] == "Legacy Assignment Without Embedded ID"
+    assert legacy_listed["viewer_has_submitted"] is True
+
+    ended_legacy = reviewer.end_submission_now(legacy_aid, now_ts=now + 50)
+    assert ended_legacy["assignment_id"] == legacy_aid
+    assert ended_legacy["review_released"] is True
+    assert ended_legacy["ended_manually"] is True
+    assert repo.get(f"/homework_assignments/{legacy_aid}")["assignment_id"] == legacy_aid
 
 
 def test_homework_multi_format_files_and_public_git_repo_ingestion(
@@ -752,11 +834,13 @@ def test_homework_reviewer_multi_student_peer_comparison_and_deadline_expiry() -
 def test_gemini_video_and_homework_http_endpoints_and_ui_assets() -> None:
     """
     Purpose:
-        End-to-end HTTP test verifying `/api/settings/gemini` (`gemini-3.5-flash-lite`
-        & `AQ.` Vertex AI Express keys), `/api/video/summarize`,
-        `/api/video/summarize-youtube`, `/api/homework/assignments`, per-student BYOK
+        End-to-end HTTP test verifying `/api/settings/gemini` (`PUT`, `POST`, `DELETE`
+        Clear Key), `/api/video/summarize-youtube` (YouTube-only, playlist URL stripping,
+        rich summary fields, and verification that the old MP4 `/api/video/summarize`
+        route is removed), `/api/homework/assignments`, per-student BYOK
         `X-Gemini-Api-Key` / `400` enforcement on `/submit`, `/submit-repo`, `/review`,
-        `/end-now`, and static delivery of `/static/js/ai_tools.js`.
+        `/end-now` (including legacy records without embedded `assignment_id`), and
+        static delivery of `/static/js/ai_tools.js`.
     Inputs:
         None.
     Outputs:
@@ -772,6 +856,7 @@ def test_gemini_video_and_homework_http_endpoints_and_ui_assets() -> None:
         use_mock_firebase=True,
         jwt_secret="checkpoint-8-gemini-video-homework-secret-32-bytes",
         lecturer_access_code="TA-ADMIN-2026",
+        gemini_api_key="AIzaEnvKeyThatShouldClearCleanly",
     )
     repo = FirebaseRepository(use_mock=True)
     repo.set(
@@ -800,19 +885,32 @@ def test_gemini_video_and_homework_http_endpoints_and_ui_assets() -> None:
     )
     stu_client.post("/api/auth/student/login", json={"email": "alice@ariel.ac.il"})
 
-    # 1. Lecturer updates Gemini settings with Vertex AI Express key & default model ID
-    initial_settings = lec_client.get("/api/settings/gemini")
-    assert initial_settings.status_code == 200
-    assert initial_settings.json()["model_id"] == "gemini-3.5-flash-lite"
-
+    # 1. Lecturer updates Gemini settings & tests Clear Key (DELETE & PUT empty)
     put_res = lec_client.put(
         "/api/settings/gemini",
         json={"api_key": "AQ.LecturerVertexDemo1234", "model_id": "gemini-3.5-flash-lite"},
     )
     assert put_res.status_code == 200
     assert put_res.json()["has_api_key"] is True
+    assert put_res.json()["has_key"] is True
     assert put_res.json()["masked_api_key"] == "AQ.L...1234"
-    assert put_res.json()["model_id"] == "gemini-3.5-flash-lite"
+
+    del_key_res = lec_client.delete("/api/settings/gemini")
+    assert del_key_res.status_code == 200
+    assert del_key_res.json()["has_api_key"] is False
+    assert del_key_res.json()["has_key"] is False
+    assert del_key_res.json()["masked_key"] is None
+
+    get_after_clear = lec_client.get("/api/settings/gemini")
+    assert get_after_clear.status_code == 200
+    assert get_after_clear.json()["has_api_key"] is False
+    assert get_after_clear.json()["has_key"] is False
+
+    # Re-save key for subsequentLecturer tests
+    lec_client.post(
+        "/api/settings/gemini",
+        json={"api_key": "AIzaLecturerActiveKey9999", "model_id": "gemini-3.5-flash-lite"},
+    )
 
     # Blank model ID is rejected with HTTP 400
     bad_model = lec_client.put(
@@ -821,12 +919,12 @@ def test_gemini_video_and_homework_http_endpoints_and_ui_assets() -> None:
     )
     assert bad_model.status_code == 400
 
-    # 2. Lecturer uploads non-MP4 / >20MB -> 400; valid .mp4 & YouTube URL -> 200
-    bad_vid = lec_client.post(
+    # 2. Old MP4 endpoint /api/video/summarize is removed (404); YouTube endpoint works & canonicalizes URLs
+    removed_mp4 = lec_client.post(
         "/api/video/summarize",
-        files={"file": ("lecture.avi", b"1234", "video/x-msvideo")},
+        files={"file": ("lecture1.mp4", b"\x00\x00\x00\x18ftypmp42data", "video/mp4")},
     )
-    assert bad_vid.status_code == 400
+    assert removed_mp4.status_code == 404
 
     bad_yt = lec_client.post(
         "/api/video/summarize-youtube",
@@ -837,22 +935,23 @@ def test_gemini_video_and_homework_http_endpoints_and_ui_assets() -> None:
     ok_yt = lec_client.post(
         "/api/video/summarize-youtube",
         json={
-            "youtube_url": "https://youtu.be/dQw4w9WgXcQ",
+            "youtube_url": "https://www.youtube.com/watch?v=8UY3LQI529o&list=PLW3u28&index=1",
             "lesson_tag": "Lesson 1",
             "lecturer_notes": "Dynamic Programming",
+            "video_mode": "transcript",
         },
     )
     assert ok_yt.status_code == 200
-    assert ok_yt.json()["source_type"] == "youtube"
-    assert ok_yt.json()["model_used"] == "gemini-3.5-flash-lite"
-
-    ok_vid = lec_client.post(
-        "/api/video/summarize?lesson_tag=Lesson+1",
-        files={"file": ("lecture1.mp4", b"\x00\x00\x00\x18ftypmp42data", "video/mp4")},
-    )
-    assert ok_vid.status_code == 200
-    assert "delivery_insights" in ok_vid.json()
-    vid_summary_id = ok_vid.json()["summary_id"]
+    yt_body = ok_yt.json()
+    assert yt_body["source_type"] == "youtube"
+    assert yt_body["youtube_url"] == "https://www.youtube.com/watch?v=8UY3LQI529o"
+    assert yt_body["video_mode"] == "transcript"
+    assert yt_body["model_used"] == "gemini-3.5-flash-lite"
+    assert "detailed_overview" in yt_body and len(yt_body["detailed_overview"]) > 40
+    assert len(yt_body["key_concepts"]) >= 1
+    assert len(yt_body["study_questions"]) >= 1
+    assert "delivery_insights" in yt_body
+    vid_summary_id = yt_body["summary_id"]
 
     # 2b. Delete Video AI summary (lecturer-protected, 404 on unknown ID, 200 removes record)
     assert stu_client.delete(f"/api/video/summaries/{vid_summary_id}").status_code == 403
@@ -877,7 +976,6 @@ def test_gemini_video_and_homework_http_endpoints_and_ui_assets() -> None:
     aid = hw_res.json()["assignment_id"]
 
     # 4a. Per-student BYOK enforcement: submitting WITHOUT X-Gemini-Api-Key must return 400
-    # even though Lecturer has a key saved in /settings/gemini!
     valid_pdf = _build_minimal_pdf_bytes("Alice PDF submission content for Ex2.")
     missing_key_hw = stu_client.post(
         f"/api/homework/assignments/{aid}/submit",
@@ -941,18 +1039,19 @@ def test_gemini_video_and_homework_http_endpoints_and_ui_assets() -> None:
         unlocked_body["peer_comparison"]["notice"] == FIRST_SUBMISSION_NOTICE
     )
 
-    # 7. Verify frontend ai_tools.js asset loads cleanly with free-text models, BYOK, & YouTube UI
+    # 7. Verify frontend ai_tools.js asset loads cleanly with YouTube-only UI, rich sections, & Copy button
     ai_js = lec_client.get("/static/js/ai_tools.js")
     assert ai_js.status_code == 200
     assert "javascript" in ai_js.headers.get("content-type", "")
     assert "renderVideoSummaryTab" in ai_js.text
     assert "renderHomeworkTab" in ai_js.text
-    assert "gemini-3.5-flash-lite" in ai_js.text
-    assert "Clear Key" in ai_js.text
-    assert "ta_student_gemini_api_key" in ai_js.text
-    assert "X-Gemini-Api-Key" in ai_js.text
-    assert "X-Gemini-Model" in ai_js.text
-    assert "/api/video/summarize-youtube" in ai_js.text
-    assert "/api/video/summaries/" in ai_js.text
-    assert "Submit Public Git Repo URL" in ai_js.text
+    assert "AI Lecture Video Summarizer" in ai_js.text
+    assert "Fast (Transcript)" in ai_js.text
+    assert "Audio Only" in ai_js.text
+    assert "Full Video (Low FPS)" in ai_js.text
+    assert "Lecture Overview & Walkthrough" in ai_js.text
+    assert "Key Concepts & Definitions" in ai_js.text
+    assert "Quick Review Questions" in ai_js.text
+    assert "Summary copied to clipboard" in ai_js.text
+    assert "Upload MP4 File" not in ai_js.text
     assert "__custom__" not in ai_js.text
