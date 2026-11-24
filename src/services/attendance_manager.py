@@ -1,7 +1,7 @@
 """
 Purpose:
     Implements `AttendanceManager` and `calculate_distance_meters` for Feature 1 (Smart Attendance):
-    1) Short-lived cryptographically signed rotating QR tokens (~8s UI rotation + ~15s total grace validity)
+    1) Static session QR token (short 16-char URL-safe code valid while the lesson session is LIVE)
        and Base64 PNG QR image generation,
     2) GPS Geofencing validation via Browser Geolocation coordinates and the Haversine great-circle
        distance formula, with a live Lecturer toggle (`enforce_geofence`) and configurable radius,
@@ -26,7 +26,6 @@ import secrets
 import time
 from typing import Any
 
-import jwt
 import openpyxl
 import qrcode
 
@@ -257,10 +256,12 @@ class AttendanceManager:
         )
 
         now_ts = int(time.time())
+        static_qr_token = secrets.token_urlsafe(12)
         session_data: dict[str, Any] = {
             "lesson_id": clean_id,
             "lesson_title": lesson_title.strip() or clean_id,
             "active": True,
+            "qr_token": static_qr_token,
             "classroom_lat": valid_lat,
             "classroom_lng": valid_lng,
             "geofence_radius_meters": radius_m,
@@ -277,7 +278,8 @@ class AttendanceManager:
     def close_session(self, lesson_id: str) -> dict[str, Any]:
         """
         Purpose:
-            Deactivate an attendance session so no further QR check-ins are accepted.
+            Deactivate an attendance session and invalidate its static session QR token
+            so no further QR check-ins are accepted.
         Inputs:
             lesson_id (str): Target lesson identifier.
         Outputs:
@@ -287,7 +289,7 @@ class AttendanceManager:
         if session is None:
             raise ValueError(f"Attendance session '{lesson_id}' was not found.")
 
-        updates = {"active": False, "closed_at": int(time.time())}
+        updates = {"active": False, "closed_at": int(time.time()), "qr_token": ""}
         return self.repository.update(f"/attendance_sessions/{lesson_id.strip()}", updates)
 
     def set_geofence_enforcement(
@@ -396,19 +398,18 @@ class AttendanceManager:
     ) -> dict[str, Any]:
         """
         Purpose:
-            Generate a short-lived, cryptographically signed QR attendance token and
-            accompanying Base64 PNG QR code for the active lesson session (~8s UI rotation
-            with ~15s total server-side token validity including grace window).
+            Return the static session QR token (short 16-char URL-safe code generated when
+            the Lecturer starts the lesson session) and accompanying Base64 PNG QR code.
+            Valid for the entire duration that the session remains LIVE and invalidated
+            when the Lecturer closes the session.
         Inputs:
             lesson_id (str): Active lesson identifier.
             base_url (str): Optional public origin URL (Cloudflare Tunnel or Render URL).
-            ttl_override_seconds (int | None): Optional custom lifetime in seconds (used in tests);
-                when set it replaces both the rotation period and the validity window.
+            ttl_override_seconds (int | None): Unused legacy parameter kept for signature compatibility.
             now_ts (int | None): Optional UNIX timestamp override for deterministic testing.
         Outputs:
             dict[str, Any]: Payload containing `lesson_id`, `qr_token`, `checkin_url`,
-            `qr_image_data_url`, `issued_at`, `expires_at`, `ttl_seconds` (UI rotation interval),
-            `valid_for_seconds` (total acceptance window), and geofence settings.
+            `qr_image_data_url`, `issued_at`, `active`, and geofence settings.
         """
         session = self.get_session(lesson_id)
         if session is None:
@@ -416,32 +417,15 @@ class AttendanceManager:
         if not session.get("active", False):
             raise ValueError(f"Attendance session '{lesson_id}' is currently closed.")
 
-        issued_at = int(now_ts) if now_ts is not None else int(time.time())
-        if ttl_override_seconds is not None:
-            rotation_seconds = int(ttl_override_seconds)
-            valid_for_seconds = rotation_seconds
-        else:
-            rotation_seconds = int(
-                session.get("rotation_seconds", self.config.qr_rotation_seconds)
+        issued_at = int(now_ts) if now_ts is not None else int(session.get("started_at") or time.time())
+        qr_token = str(session.get("qr_token") or "").strip()
+        if not qr_token:
+            qr_token = secrets.token_urlsafe(12)
+            self.repository.update(
+                f"/attendance_sessions/{session['lesson_id']}",
+                {"qr_token": qr_token},
             )
-            # Keep UI rotation fast (~8s) while granting a short server-side grace window
-            # (~7s extra -> ~15s total validity) so students scanning right before rotation succeed.
-            valid_for_seconds = rotation_seconds + max(0, self.config.qr_grace_seconds)
-        ttl_seconds = rotation_seconds
-        expires_at = issued_at + valid_for_seconds
 
-        claims = {
-            "type": "qr_attendance",
-            "lesson_id": session["lesson_id"],
-            "nonce": secrets.token_hex(6),
-            "iat": issued_at,
-            "exp": expires_at,
-        }
-        qr_token = jwt.encode(
-            claims,
-            self.config.jwt_secret,
-            algorithm=self.config.jwt_algorithm,
-        )
         clean_base = base_url.rstrip("/")
         checkin_path = f"/?lesson_id={session['lesson_id']}&qr_token={qr_token}"
         checkin_url = f"{clean_base}{checkin_path}" if clean_base else checkin_path
@@ -453,9 +437,7 @@ class AttendanceManager:
             "checkin_url": checkin_url,
             "qr_image_data_url": self._render_qr_data_url(checkin_url),
             "issued_at": issued_at,
-            "expires_at": expires_at,
-            "ttl_seconds": ttl_seconds,
-            "valid_for_seconds": valid_for_seconds,
+            "active": True,
             "enforce_geofence": bool(session.get("enforce_geofence", True)),
             "geofence_radius_meters": int(
                 session.get("geofence_radius_meters", self.config.geofence_radius_meters)
@@ -469,39 +451,67 @@ class AttendanceManager:
     ) -> dict[str, Any]:
         """
         Purpose:
-            Verify the cryptographic signature, token type, lesson binding, and
-            expiration timestamp of a rotating QR attendance token.
+            Verify that a scanned static session QR token matches an active (LIVE)
+            lesson attendance session and is bound to `expected_lesson_id`.
         Inputs:
-            qr_token (str): Signed JWT token scanned from the rotating QR code.
+            qr_token (str): Short static session token scanned from the classroom QR code.
             expected_lesson_id (str | None): Expected lesson ID to validate against.
         Outputs:
-            dict[str, Any]: Decoded QR token claims. Raises `ValueError` if expired or invalid.
+            dict[str, Any]: Verified token metadata (`type`, `lesson_id`, `qr_token`, `active`).
+            Raises `ValueError` if the session is closed, the token is invalid, or the lesson mismatches.
         """
         if not qr_token or not qr_token.strip():
             raise ValueError("QR attendance token is required.")
 
-        try:
-            claims = jwt.decode(
-                qr_token.strip(),
-                self.config.jwt_secret,
-                algorithms=[self.config.jwt_algorithm],
-            )
-        except jwt.ExpiredSignatureError as exc:
-            raise ValueError(
-                "QR code has expired. Please scan the current rotating QR code displayed by the lecturer."
-            ) from exc
-        except jwt.InvalidTokenError as exc:
-            raise ValueError("Invalid or corrupted QR attendance token.") from exc
+        candidate = qr_token.strip()
 
-        if claims.get("type") != "qr_attendance":
-            raise ValueError("Invalid token type: expected 'qr_attendance'.")
+        if expected_lesson_id and expected_lesson_id.strip():
+            clean_expected = expected_lesson_id.strip()
+            for other in self.list_sessions():
+                other_token = str(other.get("qr_token") or "").strip()
+                if (
+                    other_token
+                    and other.get("lesson_id") != clean_expected
+                    and hmac.compare_digest(candidate, other_token)
+                ):
+                    raise ValueError(
+                        "QR token belongs to a different lesson session."
+                    )
 
-        if expected_lesson_id and claims.get("lesson_id") != expected_lesson_id.strip():
-            raise ValueError(
-                "QR token belongs to a different lesson session."
-            )
+            session = self.get_session(clean_expected)
+            if session is None:
+                raise ValueError(f"Attendance session '{clean_expected}' does not exist.")
+            if not session.get("active", False):
+                raise ValueError(
+                    f"Attendance session '{clean_expected}' is closed and no longer accepting check-ins."
+                )
 
-        return dict(claims)
+            stored_token = str(session.get("qr_token") or "").strip()
+            if not stored_token or not hmac.compare_digest(candidate, stored_token):
+                raise ValueError("Invalid or inactive session QR attendance token.")
+
+            return {
+                "type": "qr_attendance",
+                "lesson_id": clean_expected,
+                "qr_token": stored_token,
+                "active": True,
+            }
+
+        for session in self.list_sessions():
+            stored_token = str(session.get("qr_token") or "").strip()
+            if stored_token and hmac.compare_digest(candidate, stored_token):
+                if not session.get("active", False):
+                    raise ValueError(
+                        f"Attendance session '{session.get('lesson_id')}' is closed and no longer accepting check-ins."
+                    )
+                return {
+                    "type": "qr_attendance",
+                    "lesson_id": str(session["lesson_id"]),
+                    "qr_token": stored_token,
+                    "active": True,
+                }
+
+        raise ValueError("Invalid or inactive session QR attendance token.")
 
     def check_device_cooldown(
         self, device_id: str, now_ts: int | None = None

@@ -209,48 +209,26 @@ function renderOverviewTab(container, ctx) {
 /* Live attendance tab                                                 */
 /* ------------------------------------------------------------------ */
 
-const RING_RADIUS = 46;
-const RING_LENGTH = 2 * Math.PI * RING_RADIUS;
-
 /**
- * Purpose: Build one QR display (animated countdown ring + QR image + seconds chip).
+ * Purpose: Build one centered static session QR display (elevated white frame + QR image + loader).
  *          Used for both the dashboard card and the full-screen projector overlay.
  * Inputs:  none.
- * Outputs: {wrap, img, ring, countdown} DOM references.
+ * Outputs: {wrap, img, loading} DOM references.
  */
 function buildQrDisplay() {
-    const ring = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    ring.setAttribute('class', 'ring-fg');
-    ring.setAttribute('cx', '50');
-    ring.setAttribute('cy', '50');
-    ring.setAttribute('r', String(RING_RADIUS));
-    ring.style.strokeDasharray = String(RING_LENGTH);
-    ring.style.strokeDashoffset = String(RING_LENGTH);
-
-    const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    bg.setAttribute('class', 'ring-bg');
-    bg.setAttribute('cx', '50');
-    bg.setAttribute('cy', '50');
-    bg.setAttribute('r', String(RING_RADIUS));
-
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('class', 'qr-ring');
-    svg.setAttribute('viewBox', '0 0 100 100');
-    svg.append(bg, ring);
-
-    const img = el('img', { alt: 'Rotating attendance QR code', width: 400, height: 400 });
+    const img = el('img', { alt: 'Session attendance QR code', width: 360, height: 360 });
     const loading = el('div', { class: 'qr-loading' }, el('span', { class: 'spinner', style: 'width:28px;height:28px;border-color:#cbd5e1;border-top-color:#334155' }));
     const frame = el('div', { class: 'qr-frame' }, [img, loading]);
-    const countdown = el('span', { class: 'qr-countdown', 'aria-live': 'off' }, '…');
-    const wrap = el('div', { class: 'qr-ring-wrap' }, [svg, frame, countdown]);
-    return { wrap, img, ring, countdown, loading };
+    const wrap = el('div', { class: 'qr-ring-wrap' }, [frame]);
+    return { wrap, img, loading };
 }
 
 /**
- * Purpose: Live attendance tab. Shows a setup form when no session is live, otherwise the rotating
- *          QR, same-network toggle, live counter and check-in feed.
+ * Purpose: Live attendance tab. Shows a setup form with the interactive Leaflet geofence map
+ *          when no session is live, otherwise the centered static session QR, GPS geofencing
+ *          toggle, cooldown reset button, live counter and check-in feed.
  * Inputs:  container (HTMLElement); ctx (dashboard context).
- * Outputs: cleanup function stopping timers, animation frames and the projector overlay.
+ * Outputs: cleanup function stopping polling timers, Leaflet map, and the projector overlay.
  */
 function renderLiveAttendanceTab(container, ctx) {
     let disposed = false;
@@ -299,7 +277,6 @@ function renderLiveAttendanceTab(container, ctx) {
 
         const lessonNo = el('input', { type: 'number', min: 1, max: 99, value: highest + 1, required: true, name: 'lesson_no' });
         const title = el('input', { type: 'text', maxlength: 80, placeholder: 'Optional, e.g. Design Patterns', name: 'title' });
-        const rotation = el('select', { name: 'rotation' }, [6, 8, 10, 12, 15].map((n) => el('option', { value: n, selected: n === 8 }, `${n} seconds`)));
         const radiusInput = el('input', { type: 'number', min: 30, max: 500, value: 100, required: true, name: 'geofence_radius_meters' });
         const latInput = el('input', { type: 'text', value: '32.104400', placeholder: 'e.g. 32.104400', name: 'classroom_lat' });
         const lngInput = el('input', { type: 'text', value: '35.207800', placeholder: 'e.g. 35.207800', name: 'classroom_lng' });
@@ -388,11 +365,10 @@ function renderLiveAttendanceTab(container, ctx) {
         });
 
         const form = el('form', { class: 'stack' }, [
-            el('div', { class: 'grid', style: 'grid-template-columns:1fr 1fr' }, [
+            el('div', { class: 'grid', style: 'grid-template-columns:1fr 2fr' }, [
                 el('label', { class: 'field' }, ['Lesson number', lessonNo]),
-                el('label', { class: 'field' }, ['QR rotates every', rotation]),
+                el('label', { class: 'field' }, ['Title', title]),
             ]),
-            el('label', { class: 'field' }, ['Title', title]),
             el('div', { class: 'grid', style: 'grid-template-columns:1fr 1fr 1fr' }, [
                 el('label', { class: 'field' }, ['Classroom Lat', latInput]),
                 el('label', { class: 'field' }, ['Classroom Lng', lngInput]),
@@ -422,7 +398,6 @@ function renderLiveAttendanceTab(container, ctx) {
                     classroom_lng: Number.isFinite(parsedLng) ? parsedLng : null,
                     geofence_radius_meters: Number(radiusInput.value) || 100,
                     enforce_geofence: enforce.checked,
-                    rotation_seconds: Number(rotation.value),
                 });
                 toast(`${session.lesson_title} is live.`, 'success');
                 showActive(session, session.geofence_warning);
@@ -520,7 +495,7 @@ function renderLiveAttendanceTab(container, ctx) {
     };
 
     /**
-     * Purpose: Render the live session view and start the QR rotation + polling loops.
+     * Purpose: Render the live session view with the centered static session QR code and live feed polling.
      * Inputs:  session (object) active attendance session; ipWarning (string | null).
      * Outputs: void (registers cleanup in `stopActive`).
      */
@@ -534,7 +509,7 @@ function renderLiveAttendanceTab(container, ctx) {
 
         const urlCode = el('code', {}, 'Generating link…');
         let currentUrl = '';
-        const copyBtn = button('Copy', { cls: 'sm', iconName: 'copy', onclick: async () => {
+        const copyBtn = button('Copy Link', { cls: 'sm', iconName: 'copy', onclick: async () => {
             if (!currentUrl) return;
             toast((await copyText(currentUrl)) ? 'Check-in link copied.' : 'Could not copy the link.', 'info', 2200);
         } });
@@ -543,59 +518,34 @@ function renderLiveAttendanceTab(container, ctx) {
             button('Close', { cls: 'projector-close', iconName: 'x', onclick: () => setProjector(false) }),
             el('h2', {}, session.lesson_title || lessonId),
             projectorQr.wrap,
-            el('p', { class: 'muted' }, 'Scan with your phone camera to check in'),
+            el('p', { class: 'muted' }, 'Scan with your phone camera to check in — protected by GPS Geofencing & 15-min device cooldown.'),
         ]);
         document.body.append(overlay);
         const setProjector = (open) => overlay.classList.toggle('open', open);
         const onKey = (e) => { if (e.key === 'Escape') setProjector(false); };
         document.addEventListener('keydown', onKey);
 
-        /* ----- QR rotation loop (requestAnimationFrame) ----- */
-        let cycleStart = -Infinity;
-        let cycleMs = (session.rotation_seconds || 12) * 1000;
-        let fetching = false;
-        let rafId = 0;
-
+        /* ----- Load static session QR code once ----- */
         const fetchQr = async () => {
-            fetching = true;
             try {
                 const data = await api.get(`/api/attendance/sessions/${encodeURIComponent(lessonId)}/qr`);
                 if (disposed) return;
-                cycleStart = performance.now();
-                cycleMs = data.ttl_seconds * 1000;
                 currentUrl = data.checkin_url;
                 urlCode.textContent = data.checkin_url;
                 for (const d of displays) {
                     d.img.src = data.qr_image_data_url;
                     d.loading.classList.add('hidden');
                     d.img.classList.remove('swap');
-                    void d.img.offsetWidth; // restart the swap animation
+                    void d.img.offsetWidth;
                     d.img.classList.add('swap');
                 }
             } catch (err) {
                 if (err.status === 401) { toast('Your session expired. Please sign in again.', 'error'); stop(); return; }
                 if (err.status === 400) { toast(err.message, 'warning'); stop(); showSetup(); return; }
                 toast(err.message, 'error');
-                cycleStart = performance.now() - cycleMs + 3000; // retry in ~3 seconds
-            } finally {
-                fetching = false;
             }
         };
-
-        const tick = (now) => {
-            const remain = Math.max(0, cycleMs - (now - cycleStart));
-            const fraction = Number.isFinite(cycleStart) ? remain / cycleMs : 0;
-            const secs = Math.ceil(remain / 1000);
-            for (const d of displays) {
-                d.ring.style.strokeDashoffset = String(RING_LENGTH * (1 - fraction));
-                d.ring.classList.toggle('warn', remain <= 5000 && remain > 2500);
-                d.ring.classList.toggle('danger', remain <= 2500);
-                d.countdown.textContent = fetching || !Number.isFinite(cycleStart) ? '…' : `${secs}s`;
-            }
-            if (remain <= 0 && !fetching && !disposed) fetchQr();
-            rafId = requestAnimationFrame(tick);
-        };
-        rafId = requestAnimationFrame(tick);
+        fetchQr();
 
         /* ----- Live counter + feed ----- */
         const countNode = el('span', { class: 'counter-big' }, '0');
@@ -659,7 +609,6 @@ function renderLiveAttendanceTab(container, ctx) {
         const pollId = setInterval(pollReport, 3500);
 
         function stop() {
-            cancelAnimationFrame(rafId);
             clearInterval(pollId);
             document.removeEventListener('keydown', onKey);
             overlay.remove();
@@ -707,15 +656,16 @@ function renderLiveAttendanceTab(container, ctx) {
 
         mount(container, el('div', { class: 'grid grid-2' }, [
             el('div', { class: 'card qr-stage' }, [
-                el('div', { class: 'row', style: 'width:100%' }, [
-                    el('h2', {}, session.lesson_title || lessonId),
-                    el('span', { class: 'chip ok live' }, [el('span', { class: 'dot' }), 'LIVE']),
-                    el('span', { class: 'spacer' }),
+                el('div', { class: 'row', style: 'width:100%;justify-content:space-between' }, [
+                    el('div', { class: 'row' }, [
+                        el('h2', {}, session.lesson_title || lessonId),
+                        el('span', { class: 'chip ok live' }, [el('span', { class: 'dot' }), 'LIVE']),
+                    ]),
                     button('Projector mode', { cls: 'sm', iconName: 'maximize', onclick: () => setProjector(true) }),
                 ]),
                 mainQr.wrap,
                 el('div', { class: 'qr-url' }, [urlCode, copyBtn]),
-                el('p', { class: 'faint' }, 'The code changes automatically (~8s); older scans stay valid for a short grace window (~15s).'),
+                el('p', { class: 'faint qr-helper-text' }, 'Scan to check in — protected by GPS Geofencing & 15-min device cooldown.'),
             ]),
             el('div', { class: 'stack' }, [
                 ipWarning ? el('div', { class: 'banner warn' }, [el('span', { html: icon('alert') }), el('span', {}, ipWarning)]) : null,

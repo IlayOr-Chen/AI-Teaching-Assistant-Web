@@ -858,13 +858,13 @@ def create_app(
     ) -> dict[str, Any]:
         """
         Purpose:
-            Lecturer-protected endpoint generating a fresh short-lived signed QR token
-            and Base64 PNG QR image for the live rotating classroom display.
+            Lecturer-protected endpoint returning the static session QR token
+            and Base64 PNG QR image for the active classroom display.
         Inputs:
             lesson_id (str): Active lesson identifier.
             request (Request): Incoming FastAPI request.
         Outputs:
-            dict[str, Any]: Rotating QR payload (`qr_token`, `qr_image_data_url`, `ttl_seconds`).
+            dict[str, Any]: Static session QR payload (`qr_token`, `checkin_url`, `qr_image_data_url`).
         """
         svc: AuthService = request.app.state.auth_service
         svc.require_lecturer_claims(request)
@@ -879,7 +879,6 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             ) from exc
-        # server_time lets the browser compute the countdown without trusting its own clock
         return {**payload, "server_time": int(time.time())}
 
     @fastapi_app.post("/api/attendance/checkin", response_class=JSONResponse)
@@ -889,7 +888,7 @@ def create_app(
         """
         Purpose:
             Student mobile QR check-in endpoint enforcing:
-            1) Cryptographically signed rotating QR token validity (~8s rotation + grace window),
+            1) Active lesson session & static session QR token validity,
             2) GPS Geofencing validation via Haversine distance (when enabled),
             3) 15-Minute Device Cooldown via signed HTTP-only cookie + Firebase RTDB.
         Inputs:

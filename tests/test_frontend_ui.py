@@ -93,6 +93,8 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
             "Use My Current Location",
             "RADIUS_OPTIONS = [30, 50, 100]",
             "invalidateSize()",
+            "Copy Link",
+            "Scan to check in — protected by GPS Geofencing & 15-min device cooldown.",
         ],
         "/static/js/student.js": ["renderStudentCheckin", "renderStudentLogin", "renderStudentPortal", "combo-email"],
         "/static/js/ui.js": ["toast", "createTabs", "pageShell", "withLoading"],

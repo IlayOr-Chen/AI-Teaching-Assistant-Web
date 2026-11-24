@@ -63,9 +63,9 @@ export async function renderStudentCheckin(root, { lessonId, qrToken }) {
     try {
         context = await api.get(`/api/attendance/checkin-context?lesson_id=${encodeURIComponent(lessonId)}&qr_token=${encodeURIComponent(qrToken)}`);
     } catch (err) {
-        const expired = /expired/i.test(err.message);
-        mount(host, resultView('err', expired ? 'This QR code has expired' : 'Cannot open check-in', expired
-            ? 'QR codes rotate every few seconds. Scan the code currently shown on the lecturer\'s screen again.'
+        const closed = /closed|not open|inactive/i.test(err.message);
+        mount(host, resultView('err', closed ? 'This attendance session is closed' : 'Cannot open check-in', closed
+            ? 'The lecturer has closed this session or opened a new one. Scan the QR code currently shown on the lecturer\'s screen.'
             : err.message, [button('Back to start', { cls: 'block', onclick: () => { window.location.href = '/'; } })]));
         return;
     }
@@ -207,9 +207,9 @@ export async function renderStudentCheckin(root, { lessonId, qrToken }) {
             mount(host, resultView('err', 'Classroom GPS Geofence Check Failed',
                 message,
                 [button('Retry GPS & Check-In', { cls: 'primary block', onclick: () => window.location.reload() })]));
-        } else if (/expired/i.test(message)) {
-            mount(host, resultView('err', 'This QR code has expired',
-                'Scan the code currently shown on the lecturer\'s screen again.'));
+        } else if (/closed|not open|inactive/i.test(message)) {
+            mount(host, resultView('err', 'Attendance session is closed',
+                'This session is no longer accepting check-ins. Ask your lecturer if you need manual attendance.'));
         } else {
             showError(message);
             toast(message, 'error');

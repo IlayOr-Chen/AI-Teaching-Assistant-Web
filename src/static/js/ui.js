@@ -129,9 +129,10 @@ export function createTabs(tabs, { onChange, initialId } = {}) {
     let cleanup = null;
 
     const moveIndicator = (btn) => {
+        if (!btn) return;
         indicator.style.width = `${btn.offsetWidth}px`;
-        // offsetLeft is already measured from the bar's padding edge, matching `left: 0`
-        indicator.style.transform = `translateX(${btn.offsetLeft}px)`;
+        indicator.style.height = `${btn.offsetHeight}px`;
+        indicator.style.transform = `translate(${btn.offsetLeft}px, ${btn.offsetTop}px)`;
     };
 
     const select = (id) => {

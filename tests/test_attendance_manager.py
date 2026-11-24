@@ -126,19 +126,25 @@ def test_rotating_qr_token_generation_and_expiration(
 ) -> None:
     """
     Purpose:
-        Verify that `generate_rotating_qr_token` produces unique, short-lived,
-        cryptographically signed tokens (~8s UI rotation + ~7s grace = 15s total validity)
-        and Base64 PNG QR images, and that `verify_qr_token` rejects expired, tampered,
-        or wrong-lesson tokens.
+        Verify that starting a session generates ONE short static session QR token
+        (16 URL-safe characters) valid for the entire duration that the session
+        remains LIVE (`active=True`), and that `verify_qr_token` rejects tokens once
+        the session is closed, or when presented with a wrong-lesson or forged token.
     Inputs:
         attendance_env: Isolated attendance test fixture.
     Outputs:
         None.
     """
-    config, _, manager = attendance_env
-    manager.start_session(
+    _, _, manager = attendance_env
+    session = manager.start_session(
         lesson_id="lesson_1",
         lesson_title="Lesson 1: OOD Principles",
+        classroom_lat=CLASSROOM_LAT,
+        classroom_lng=CLASSROOM_LNG,
+    )
+    manager.start_session(
+        lesson_id="lesson_2",
+        lesson_title="Lesson 2: Design Patterns",
         classroom_lat=CLASSROOM_LAT,
         classroom_lng=CLASSROOM_LNG,
     )
@@ -146,37 +152,30 @@ def test_rotating_qr_token_generation_and_expiration(
     qr1 = manager.generate_rotating_qr_token("lesson_1", base_url="https://ta.example.com")
     qr2 = manager.generate_rotating_qr_token("lesson_1", base_url="https://ta.example.com")
 
-    assert qr1["qr_token"] != qr2["qr_token"]
-    assert qr1["ttl_seconds"] == 8
-    assert qr1["valid_for_seconds"] == 15
+    # Static session QR: same short URL-safe token returned throughout the active session
+    assert qr1["qr_token"] == qr2["qr_token"] == session["qr_token"]
+    assert 12 <= len(qr1["qr_token"]) <= 20
+    assert qr1["active"] is True
     assert qr1["qr_image_data_url"].startswith("data:image/png;base64,")
-    assert "lesson_id=lesson_1" in qr1["checkin_url"]
+    assert f"lesson_id=lesson_1&qr_token={qr1['qr_token']}" in qr1["checkin_url"]
 
     claims = manager.verify_qr_token(qr1["qr_token"], expected_lesson_id="lesson_1")
     assert claims["lesson_id"] == "lesson_1"
     assert claims["type"] == "qr_attendance"
+    assert claims["active"] is True
 
     # Edge case 1: Token used for a different lesson session is rejected
     with pytest.raises(ValueError, match="different lesson session"):
         manager.verify_qr_token(qr1["qr_token"], expected_lesson_id="lesson_2")
 
-    # Edge case 2: Expired rotating QR token is rejected
-    expired_qr = manager.generate_rotating_qr_token(
-        "lesson_1", ttl_override_seconds=-5
-    )
-    with pytest.raises(ValueError, match="QR code has expired"):
-        manager.verify_qr_token(expired_qr["qr_token"], expected_lesson_id="lesson_1")
+    # Edge case 2: Forged or random token is rejected
+    with pytest.raises(ValueError, match="Invalid or inactive session QR attendance token"):
+        manager.verify_qr_token("forged_wrong_token", expected_lesson_id="lesson_1")
 
-    # Edge case 3: Non-QR JWT token is rejected
-    auth_svc = AuthService(repository=manager.repository, config=config)
-    regular_user_jwt = auth_svc.create_jwt_token(
-        subject_id="stu_alice",
-        role="student",
-        email="alice@ariel.ac.il",
-        full_name="Alice Cohen",
-    )
-    with pytest.raises(ValueError, match="Invalid token type"):
-        manager.verify_qr_token(regular_user_jwt, expected_lesson_id="lesson_1")
+    # Edge case 3: Once the Lecturer closes the session, the static session token is invalidated
+    manager.close_session("lesson_1")
+    with pytest.raises(ValueError, match="closed"):
+        manager.verify_qr_token(qr1["qr_token"], expected_lesson_id="lesson_1")
 
 
 def test_signed_device_cookie_creation_and_tamper_detection(
