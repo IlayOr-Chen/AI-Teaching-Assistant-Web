@@ -1,17 +1,19 @@
 """
 Purpose:
     Implements `GeminiClient` encapsulating Google Gemini API configuration
-    (Lecturer API key and configurable model ID stored in Firebase RTDB under
-    `/settings/gemini`, defaulting to `gemini-2.5-flash` with valid model presets
-    `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-2.5-pro`, `gemini-2.0-flash`)
-    and real multimodal inference via the official `google-genai` SDK (including the
-    Gemini Files API for large MP4 lecture recordings).
+    (BYOK per-user API key & configurable model ID defaulting to `gemini-3.5-flash-lite`,
+    with quick presets `gemini-3.5-flash-lite`, `gemini-3.5-flash`, `gemini-2.5-flash`,
+    while allowing any custom model ID) and real multimodal inference via the official
+    `google-genai` SDK — supporting both AI Studio keys (`AIza...`) and Vertex AI
+    Express keys (`AQ....`), direct YouTube URI analysis (`Part.from_uri`), and
+    MP4 uploads (`<= 20 MB`) via the Gemini Files API.
 Inputs:
-    `FirebaseRepository` persistence instance, `AppConfig` defaults, and optional
-    custom transport callable strictly for automated `pytest` unit tests.
+    `FirebaseRepository` persistence instance, `AppConfig` defaults, per-request BYOK
+    key/model overrides (`X-Gemini-Api-Key`, `X-Gemini-Model`), and optional custom
+    transport callable strictly for automated `pytest` unit tests.
 Outputs:
-    `GeminiClient` class managing Gemini credentials, model selection, Files API video upload,
-    and structured JSON generation without any silent fake production fallbacks.
+    `GeminiClient` class managing Gemini credentials, model selection, Video/YouTube
+    analysis, and structured JSON generation with zero silent fake fallbacks.
 """
 
 from __future__ import annotations
@@ -30,12 +32,11 @@ from src.repository.firebase_repository import FirebaseRepository
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 VALID_GEMINI_PRESETS = (
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
     "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-pro",
-    "gemini-2.0-flash",
 )
 
 PLACEHOLDER_KEYS = {
@@ -50,9 +51,10 @@ class GeminiClient:
     """
     Purpose:
         Centralized OOP wrapper for Google Gemini multimodal and text generation.
-        Persists Lecturer API key and model overrides in Firebase RTDB (`/settings/gemini`),
-        uploads MP4 videos via the Gemini Files API (`client.files.upload`), and
-        surfaces real errors whenever the API key is missing or Gemini returns an error.
+        Supports Bring-Your-Own-Key (BYOK) per-request credentials (`X-Gemini-Api-Key`,
+        `X-Gemini-Model`) for students as well as Lecturer credentials persisted in
+        Firebase RTDB (`/settings/gemini`), and initializes the official `google-genai`
+        SDK for both AI Studio (`AIza...`) and Vertex AI Express (`AQ....`) keys.
     Inputs:
         repository (FirebaseRepository): Firebase RTDB persistence layer.
         config (AppConfig): Application configuration providing default key and model.
@@ -87,7 +89,7 @@ class GeminiClient:
         """
         Purpose:
             Mask a secret Gemini API key for safe display in the Lecturer Settings UI
-            (e.g., `AIza...9xYz` or `""` when unconfigured).
+            (e.g., `AIza...9xYz` or `AQ.A...9xYz` or `""` when unconfigured).
         Inputs:
             api_key (str): Raw API key string.
         Outputs:
@@ -100,36 +102,74 @@ class GeminiClient:
             return "****" + clean[-2:]
         return f"{clean[:4]}...{clean[-4:]}"
 
-    def resolve_credentials(self) -> tuple[str, str]:
+    @staticmethod
+    def _build_genai_client(api_key: str) -> Any:
         """
         Purpose:
-            Resolve the currently active `(api_key, model_id)` by checking Firebase RTDB
-            `/settings/gemini` first and falling back to `AppConfig` defaults, while
-            automatically healing any invalid legacy `gemini-3.5-*` model IDs to `gemini-2.5-flash`.
+            Instantiate a `google.genai.Client` supporting both Vertex AI Express API keys
+            (prefix `AQ.`) and Google AI Studio API keys (prefix `AIza` / standard keys).
         Inputs:
-            None.
+            api_key (str): Valid Gemini or Vertex AI Express API key.
+        Outputs:
+            Any: Configured `google.genai.Client` instance.
+        """
+        from google import genai
+
+        clean_key = (api_key or "").strip()
+        if clean_key.startswith("AQ."):
+            return genai.Client(vertexai=True, api_key=clean_key)
+        return genai.Client(api_key=clean_key)
+
+    def resolve_credentials(
+        self,
+        api_key_override: str | None = None,
+        model_id_override: str | None = None,
+        allow_stored_key: bool = True,
+    ) -> tuple[str, str]:
+        """
+        Purpose:
+            Resolve `(api_key, model_id)`. If `allow_stored_key=True` (Lecturer mode), checks
+            per-request overrides -> Firebase RTDB `/settings/gemini` -> `AppConfig` fallback.
+            If `allow_stored_key=False` (Student BYOK mode), strictly uses the student's
+            request override without ever falling back to Lecturer `/settings/gemini` or `.env`.
+        Inputs:
+            api_key_override (str | None): Optional per-request BYOK API key (`X-Gemini-Api-Key`).
+            model_id_override (str | None): Optional per-request model ID (`X-Gemini-Model`).
+            allow_stored_key (bool): Whether to fall back to Lecturer/env key when override is omitted.
         Outputs:
             tuple[str, str]: `(active_api_key, active_model_id)`.
         """
+        raw_override_key = (api_key_override or "").strip()
+        clean_override_key = (
+            "" if raw_override_key.lower() in PLACEHOLDER_KEYS else raw_override_key
+        )
+        raw_override_model = (model_id_override or "").strip()
+
+        if not allow_stored_key:
+            active_model = raw_override_model or DEFAULT_GEMINI_MODEL
+            return clean_override_key, active_model
+
         stored = self.repository.get("/settings/gemini")
         stored_dict = stored if isinstance(stored, dict) else {}
 
-        raw_key = str(
-            stored_dict.get("api_key") or self.config.gemini_api_key or ""
-        ).strip()
-        active_key = "" if raw_key.lower() in PLACEHOLDER_KEYS else raw_key
-
-        raw_model = str(
-            stored_dict.get("model_id")
-            or self.config.gemini_model
-            or DEFAULT_GEMINI_MODEL
-        ).strip()
-        if not raw_model or raw_model.lower().startswith("gemini-3.5"):
-            active_model = DEFAULT_GEMINI_MODEL
-            if isinstance(stored, dict) and str(stored.get("model_id", "")).lower().startswith("gemini-3.5"):
-                self.repository.update("/settings/gemini", {"model_id": DEFAULT_GEMINI_MODEL})
+        if clean_override_key:
+            active_key = clean_override_key
         else:
-            active_model = raw_model
+            raw_key = str(
+                stored_dict.get("api_key") or self.config.gemini_api_key or ""
+            ).strip()
+            active_key = "" if raw_key.lower() in PLACEHOLDER_KEYS else raw_key
+
+        if raw_override_model:
+            active_model = raw_override_model
+        else:
+            raw_model = str(
+                stored_dict.get("model_id")
+                or self.config.gemini_model
+                or DEFAULT_GEMINI_MODEL
+            ).strip()
+            active_model = raw_model or DEFAULT_GEMINI_MODEL
+
         return active_key, active_model
 
     def get_settings(self) -> dict[str, Any]:
@@ -162,12 +202,12 @@ class GeminiClient:
         """
         Purpose:
             Update the Lecturer's Gemini API Key and/or Gemini Model ID in Firebase RTDB
-            under `/settings/gemini`. Rejects invalid `gemini-3.5-*` model IDs.
+            under `/settings/gemini`. Supports any valid custom model ID string
+            (e.g., `gemini-3.5-flash-lite`, `gemini-3.5-flash`, `gemini-2.5-flash`).
         Inputs:
             api_key (str | None): New Gemini API key (pass None to keep existing key,
                 or empty string `""` to clear).
-            model_id (str | None): Desired Gemini model ID (e.g., `gemini-2.5-flash`,
-                `gemini-2.5-flash-lite`, `gemini-2.5-pro`, `gemini-2.0-flash`).
+            model_id (str | None): Desired Gemini model ID.
         Outputs:
             dict[str, Any]: Updated public settings dictionary with masked key.
         """
@@ -177,11 +217,6 @@ class GeminiClient:
             clean_model = model_id.strip()
             if not clean_model:
                 raise ValueError("Gemini model_id cannot be empty.")
-            if clean_model.lower().startswith("gemini-3.5"):
-                raise ValueError(
-                    f"Invalid Gemini model ID '{clean_model}'. Valid models include: "
-                    f"{', '.join(VALID_GEMINI_PRESETS)}."
-                )
             next_model = clean_model
         else:
             next_model = current_model
@@ -234,27 +269,40 @@ class GeminiClient:
         fallback_builder: Callable[[], dict[str, Any]] | None = None,
         media_bytes: bytes | None = None,
         mime_type: str | None = None,
+        file_uri: str | None = None,
+        api_key_override: str | None = None,
+        model_id_override: str | None = None,
+        allow_stored_key: bool = True,
+        missing_key_error: str | None = None,
     ) -> dict[str, Any]:
         """
         Purpose:
             Execute a structured JSON generation request against the real Google Gemini API
-            (or custom test transport in `pytest`). For MP4 video payloads (`mime_type == "video/mp4"`),
-            writes an ASCII-safe temporary file, uploads it via the Gemini Files API
-            (`client.files.upload`), polls until `ACTIVE`, generates the structured JSON content,
-            and cleans up both local and remote files in a `finally:` block.
-            Never returns silent fake/hardcoded fallback content in production: raises `RuntimeError`
-            with a clear message if `GEMINI_API_KEY` is missing or the Gemini API fails.
+            (or custom test transport in `pytest`). Supports both AI Studio (`AIza...`)
+            and Vertex AI Express (`AQ....`) keys, direct YouTube URI analysis
+            (`types.Part.from_uri(file_uri=..., mime_type="video/mp4")`), MP4 uploads
+            (`<= 20 MB`, using Gemini Files API for AI Studio or `Part.from_bytes` for
+            Vertex AI Express), and multimodal PDF/text evaluation.
+            Never returns silent fake/hardcoded fallback content in production.
         Inputs:
             prompt (str): Structured instruction prompt requesting JSON output.
-            fallback_builder (Callable[[], dict[str, Any]] | None): Deprecated/unused in production;
-                only called if explicitly invoked by a custom unit-test transport.
+            fallback_builder (Callable[[], dict[str, Any]] | None): Deprecated/unused in production.
             media_bytes (bytes | None): Optional binary payload (MP4 video or document bytes).
             mime_type (str | None): Optional MIME type (`"video/mp4"`, `"application/pdf"`, etc.).
+            file_uri (str | None): Optional public YouTube URL passed via `Part.from_uri`.
+            api_key_override (str | None): Optional BYOK API key header override.
+            model_id_override (str | None): Optional BYOK model ID header override.
+            allow_stored_key (bool): False for student BYOK mode so Lecturer/env keys are never used.
+            missing_key_error (str | None): Custom error message when API key is missing.
         Outputs:
             dict[str, Any]: Structured result dictionary enriched with `model_used` and `provider`.
-            Raises `RuntimeError` on missing API key or Gemini API errors.
+            Raises `ValueError` or `RuntimeError` if API key is missing or Gemini returns an error.
         """
-        api_key, model_id = self.resolve_credentials()
+        api_key, model_id = self.resolve_credentials(
+            api_key_override=api_key_override,
+            model_id_override=model_id_override,
+            allow_stored_key=allow_stored_key,
+        )
 
         if self._transport is not None:
             result = self._transport(
@@ -263,91 +311,133 @@ class GeminiClient:
                 api_key=api_key,
                 media_bytes=media_bytes,
                 mime_type=mime_type,
+                file_uri=file_uri,
             )
             return {**result, "model_used": model_id, "provider": "custom_transport"}
 
         if not api_key:
-            msg = (
-                "GEMINI_API_KEY is missing or not configured. Please set a valid Google Gemini API key "
-                "in the Lecturer Gemini AI Settings panel or in your .env file."
+            msg = missing_key_error or (
+                "Gemini API Key is missing. Please enter your Google Gemini API key "
+                "(AIza... or AQ....) in the Gemini AI Settings panel above."
             )
             logger.error(msg)
             raise RuntimeError(msg)
 
         try:
-            from google import genai
             from google.genai import types
 
-            client = genai.Client(api_key=api_key)
+            client = self._build_genai_client(api_key)
 
-            if media_bytes and mime_type and mime_type.lower().startswith("video/"):
-                temp_path: str | None = None
-                uploaded_file: Any = None
-                try:
-                    # Use an ASCII-safe temporary filename so Hebrew/Unicode video filenames
-                    # never cause filesystem or HTTP header encoding errors during Files API upload.
-                    with tempfile.NamedTemporaryFile(
-                        prefix="gemini_lecture_", suffix=".mp4", delete=False
-                    ) as tmp_file:
-                        tmp_file.write(media_bytes)
-                        temp_path = tmp_file.name
-
+            if file_uri and file_uri.strip():
+                logger.info(
+                    "Analyzing video URI '%s' directly with Gemini model '%s'...",
+                    file_uri.strip(),
+                    model_id,
+                )
+                uri_part = types.Part.from_uri(
+                    file_uri=file_uri.strip(),
+                    mime_type=mime_type or "video/mp4",
+                )
+                response = client.models.generate_content(
+                    model=model_id,
+                    contents=[uri_part, prompt],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.2,
+                    ),
+                )
+            elif media_bytes and mime_type and mime_type.lower().startswith("video/"):
+                # Vertex AI Express keys (AQ....) use inline Part.from_bytes for <= 20 MB MP4 clips,
+                # whereas Gemini AI Studio keys (AIza...) upload via the official Gemini Files API.
+                if getattr(client, "vertexai", False):
                     logger.info(
-                        "Uploading MP4 video (%d bytes) to Gemini Files API via model '%s'...",
+                        "Analyzing MP4 video (%d bytes) inline via Vertex AI Express model '%s'...",
                         len(media_bytes),
                         model_id,
                     )
-                    uploaded_file = client.files.upload(file=temp_path)
-
-                    poll_start = time.time()
-                    while True:
-                        state_obj = getattr(uploaded_file, "state", None)
-                        state_name = (
-                            getattr(state_obj, "name", None)
-                            or str(state_obj or "").upper()
-                        )
-                        if "PROCESSING" not in state_name:
-                            break
-                        if time.time() - poll_start > 300:
-                            raise RuntimeError(
-                                "Timed out waiting for Gemini Files API to finish processing the MP4 video."
-                            )
-                        time.sleep(2.5)
-                        uploaded_file = client.files.get(name=uploaded_file.name)
-
-                    final_state_obj = getattr(uploaded_file, "state", None)
-                    final_state = (
-                        getattr(final_state_obj, "name", None)
-                        or str(final_state_obj or "").upper()
+                    video_part = types.Part.from_bytes(
+                        data=media_bytes, mime_type=mime_type
                     )
-                    if "FAILED" in final_state:
-                        raise RuntimeError(
-                            f"Gemini Files API failed to process the uploaded MP4 video (state={final_state})."
-                        )
-
                     response = client.models.generate_content(
                         model=model_id,
-                        contents=[uploaded_file, prompt],
+                        contents=[video_part, prompt],
                         config=types.GenerateContentConfig(
                             response_mime_type="application/json",
                             temperature=0.2,
                         ),
                     )
-                finally:
-                    if temp_path:
-                        try:
-                            Path(temp_path).unlink(missing_ok=True)
-                        except Exception as cleanup_err:
-                            logger.warning("Failed to delete local temp MP4 %s: %s", temp_path, cleanup_err)
-                    if uploaded_file is not None and getattr(uploaded_file, "name", None):
-                        try:
-                            client.files.delete(name=uploaded_file.name)
-                        except Exception as remote_err:
-                            logger.warning(
-                                "Failed to delete remote Gemini file %s: %s",
-                                getattr(uploaded_file, "name", ""),
-                                remote_err,
+                else:
+                    temp_path: str | None = None
+                    uploaded_file: Any = None
+                    try:
+                        # Use an ASCII-safe temporary filename so Hebrew/Unicode filenames
+                        # never cause filesystem or HTTP header errors during Files API upload.
+                        with tempfile.NamedTemporaryFile(
+                            prefix="gemini_lecture_", suffix=".mp4", delete=False
+                        ) as tmp_file:
+                            tmp_file.write(media_bytes)
+                            temp_path = tmp_file.name
+
+                        logger.info(
+                            "Uploading MP4 video (%d bytes) to Gemini Files API via model '%s'...",
+                            len(media_bytes),
+                            model_id,
+                        )
+                        uploaded_file = client.files.upload(file=temp_path)
+
+                        poll_start = time.time()
+                        while True:
+                            state_obj = getattr(uploaded_file, "state", None)
+                            state_name = (
+                                getattr(state_obj, "name", None)
+                                or str(state_obj or "").upper()
                             )
+                            if "PROCESSING" not in state_name:
+                                break
+                            if time.time() - poll_start > 300:
+                                raise RuntimeError(
+                                    "Timed out waiting for Gemini Files API to finish processing the MP4 video."
+                                )
+                            time.sleep(2.5)
+                            uploaded_file = client.files.get(name=uploaded_file.name)
+
+                        final_state_obj = getattr(uploaded_file, "state", None)
+                        final_state = (
+                            getattr(final_state_obj, "name", None)
+                            or str(final_state_obj or "").upper()
+                        )
+                        if "FAILED" in final_state:
+                            raise RuntimeError(
+                                f"Gemini Files API failed to process the uploaded MP4 video (state={final_state})."
+                            )
+
+                        response = client.models.generate_content(
+                            model=model_id,
+                            contents=[uploaded_file, prompt],
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                                temperature=0.2,
+                            ),
+                        )
+                    finally:
+                        if temp_path:
+                            try:
+                                Path(temp_path).unlink(missing_ok=True)
+                            except Exception as cleanup_err:
+                                logger.warning(
+                                    "Failed to delete local temp MP4 %s: %s",
+                                    temp_path,
+                                    cleanup_err,
+                                )
+                        if uploaded_file is not None and getattr(uploaded_file, "name", None):
+                            try:
+                                client.files.delete(name=uploaded_file.name)
+                            except Exception as remote_err:
+                                logger.warning(
+                                    "Failed to delete remote Gemini file %s: %s",
+                                    getattr(uploaded_file, "name", ""),
+                                    remote_err,
+                                )
             else:
                 contents: list[Any] = []
                 if media_bytes and mime_type:

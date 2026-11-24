@@ -39,8 +39,8 @@ class AppConfig:
         device_cooldown_minutes (int): Cooldown period in minutes enforced per student device (15m).
         enforce_geofence_default (bool): Default state for GPS Geofencing check (True).
         geofence_radius_meters (int): Default allowed Haversine radius in meters around the classroom (100m).
-        gemini_api_key (str): Google Gemini API key for lecture video and homework analysis.
-        gemini_model (str): Default Gemini model identifier (default `gemini-2.5-flash`).
+        gemini_api_key (str): Optional Google Gemini API key fallback (BYOK keys are provided via UI/headers).
+        gemini_model (str): Default Gemini model identifier (default `gemini-3.5-flash-lite`).
         yolo_model_path (str): Path or model name for Ultralytics YOLO weights.
         yolo_confidence_threshold (float): Minimum detection confidence for person bounding boxes.
         public_base_url (str): Optional public origin (Cloudflare Tunnel / Render URL) used to
@@ -65,7 +65,7 @@ class AppConfig:
     enforce_geofence_default: bool = True
     geofence_radius_meters: int = 100
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.5-flash-lite"
     yolo_model_path: str = "yolov8n.pt"
     yolo_confidence_threshold: float = 0.30
     public_base_url: str = ""
@@ -117,7 +117,7 @@ class AppConfig:
             enforce_geofence_default=enforce_geofence,
             geofence_radius_meters=int(os.getenv("GEOFENCE_RADIUS_METERS", "100")),
             gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip(),
-            gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip(),
+            gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip(),
             yolo_model_path=os.getenv("YOLO_MODEL_PATH", "yolov8n.pt").strip(),
             yolo_confidence_threshold=float(
                 os.getenv("YOLO_CONFIDENCE_THRESHOLD", "0.30")

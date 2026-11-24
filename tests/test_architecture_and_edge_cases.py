@@ -132,6 +132,7 @@ EXPECTED_CLASS_METHODS: dict[type, set[str]] = {
     },
     GeminiClient: {
         "mask_api_key",
+        "_build_genai_client",
         "resolve_credentials",
         "get_settings",
         "update_settings",
@@ -140,6 +141,7 @@ EXPECTED_CLASS_METHODS: dict[type, set[str]] = {
     },
     VideoSummarizer: {
         "validate_mp4_upload",
+        "validate_youtube_url",
         "_build_prompt",
         "summarize_video",
         "list_summaries",
@@ -277,7 +279,7 @@ def test_domain_services_boundary_and_negative_edge_cases() -> None:
         hw.create_assignment("Bad Deadline", "Desc", deadline_ts=0)
 
     valid_hw = hw.create_assignment("Valid HW", "Desc", deadline_ts=1_900_000_000)
-    with pytest.raises(ValueError, match="No PDF submission found"):
+    with pytest.raises(ValueError, match="No homework submission found"):
         hw.get_student_review_and_comparison(
             valid_hw["assignment_id"], "stu_never_submitted"
         )

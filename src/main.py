@@ -10,10 +10,14 @@ Outputs:
 
 from __future__ import annotations
 
+import logging
 import mimetypes
+import re
 import time
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from fastapi import (
     FastAPI,
@@ -326,6 +330,21 @@ class SubmitHomeworkRepoRequest(BaseModel):
     repo_url: str
     student_id: str | None = None
     student_name: str | None = None
+
+
+class SummarizeYoutubeVideoRequest(BaseModel):
+    """
+    Purpose:
+        Pydantic schema for summarizing a public YouTube lecture video directly via Gemini.
+    Inputs:
+        youtube_url (str), lesson_tag (str), lecturer_notes (str).
+    Outputs:
+        Validated `SummarizeYoutubeVideoRequest` instance.
+    """
+
+    youtube_url: str
+    lesson_tag: str = "Lesson 1"
+    lecturer_notes: str = ""
 
 
 def create_app(
@@ -1102,36 +1121,57 @@ def create_app(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             ) from exc
 
-    def _resolve_caller_identity(request: Request) -> dict[str, str]:
+    def _resolve_caller_identity(
+        request: Request, prefer_role: str | None = None
+    ) -> dict[str, str]:
         """
         Purpose:
-            Inspect the caller's JWT cookie/header and return their `id`, `name`,
-            and `role` (`"lecturer"` or `"student"`), falling back to a signed
-            device cookie or guest student identity when unauthenticated.
+            Inspect the caller's JWT cookies/header and return their Firebase-safe `id`,
+            `name`, and `role` (`"lecturer"` or `"student"`), falling back to a signed
+            device cookie or sanitized IP identity when unauthenticated.
         Inputs:
             request (Request): Incoming FastAPI request.
+            prefer_role (str | None): Optional preferred role (`"student"` or `"lecturer"`).
         Outputs:
             dict[str, str]: Dictionary with keys `"id"`, `"name"`, and `"role"`.
         """
         svc: AuthService = request.app.state.auth_service
-        token = svc.extract_token_from_request(request)
-        if token:
+        candidate_tokens: list[str] = []
+        auth_header = request.headers.get("Authorization", "").strip()
+        if auth_header.lower().startswith("bearer "):
+            candidate_tokens.append(auth_header[7:].strip())
+
+        if prefer_role == "student":
+            cookie_order = (STUDENT_COOKIE_NAME, LECTURER_COOKIE_NAME)
+        else:
+            cookie_order = (LECTURER_COOKIE_NAME, STUDENT_COOKIE_NAME)
+
+        for cookie_name in cookie_order:
+            cookie_val = request.cookies.get(cookie_name)
+            if cookie_val and cookie_val not in candidate_tokens:
+                candidate_tokens.append(cookie_val)
+
+        for tok in candidate_tokens:
             try:
-                claims = svc.verify_jwt_token(token)
+                claims = svc.verify_jwt_token(tok)
+                raw_sub = str(claims.get("sub", "guest")).strip()
+                safe_sub = re.sub(r"[.$#\[\]/]", "_", raw_sub) or "guest"
                 return {
-                    "id": str(claims.get("sub", "guest")),
+                    "id": safe_sub,
                     "name": str(claims.get("full_name", "Student")),
                     "role": str(claims.get("role", "student")),
                 }
             except Exception:
-                pass
+                continue
 
         mgr: AttendanceManager = request.app.state.attendance_manager
         dev_id = mgr.verify_signed_device_cookie(
             request.cookies.get(DEVICE_COOKIE_NAME)
         )
+        raw_fallback = dev_id or f"ip_{ClientIPResolver.resolve(request)}"
+        safe_fallback = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_fallback) or "guest_student"
         return {
-            "id": dev_id or f"ip_{ClientIPResolver.resolve(request)}",
+            "id": safe_fallback,
             "name": "Student",
             "role": "student",
         }
@@ -1382,8 +1422,8 @@ def create_app(
         """
         Purpose:
             Lecturer-protected endpoint allowing the Lecturer to enter/update their
-            Gemini API Key and configure the Gemini Model ID (e.g., `gemini-2.5-flash-lite`
-            or custom `gemini-3.5-flash-lite`).
+            Gemini API Key and configure the Gemini Model ID (defaulting to `gemini-3.5-flash-lite`
+            with support for presets like `gemini-3.5-flash`, `gemini-2.5-flash`, or custom IDs).
         Inputs:
             payload (UpdateGeminiSettingsRequest): New API key and/or model ID.
             request (Request): Incoming FastAPI request.
@@ -1406,19 +1446,22 @@ def create_app(
     @fastapi_app.post("/api/video/summarize", response_class=JSONResponse)
     async def summarize_lecture_video_endpoint(
         request: Request,
-        file: UploadFile = File(...),
+        file: UploadFile | None = File(default=None),
+        youtube_url: str | None = Query(default=None),
         lesson_tag: str = Query(default="Lesson 1"),
         lecturer_notes: str = Query(default=""),
     ) -> dict[str, Any]:
         """
         Purpose:
             Lecturer-protected endpoint for Feature 4 (ML Lecture Video Summary).
-            Strictly accepts `.mp4` files only, analyzes the lecture via `VideoSummarizer`
-            and `GeminiClient`, and returns a concise structured summary (Executive Summary,
-            Key Topics, Core Takeaways, Action Items, and Lecturer Delivery Insights).
+            Supports either an uploaded `.mp4` file (`<= 20 MB`, uploaded via the Gemini
+            Files API) OR a public `youtube_url` (passed directly to Gemini via `Part.from_uri`),
+            returning a concise structured summary (Executive Summary, Key Topics, Core
+            Takeaways, Action Items, and Lecturer Delivery Insights).
         Inputs:
             request (Request): Incoming FastAPI request.
-            file (UploadFile): Uploaded `.mp4` lecture video file.
+            file (UploadFile | None): Uploaded `.mp4` lecture video file.
+            youtube_url (str | None): Optional public YouTube URL.
             lesson_tag (str): Associated lesson identifier tag.
             lecturer_notes (str): Optional context notes.
         Outputs:
@@ -1428,7 +1471,21 @@ def create_app(
         svc.require_lecturer_claims(request)
 
         summarizer: VideoSummarizer = request.app.state.video_summarizer
+        header_api_key = request.headers.get("X-Gemini-Api-Key")
+        header_model = request.headers.get("X-Gemini-Model")
         try:
+            if youtube_url and youtube_url.strip():
+                return summarizer.summarize_video(
+                    youtube_url=youtube_url.strip(),
+                    lesson_tag=lesson_tag,
+                    lecturer_notes=lecturer_notes,
+                    gemini_api_key=header_api_key,
+                    gemini_model_id=header_model,
+                )
+            if file is None:
+                raise ValueError(
+                    "Please upload an MP4 (.mp4) video file or provide a public YouTube URL."
+                )
             raw_bytes = await file.read()
             return summarizer.summarize_video(
                 filename=file.filename or "",
@@ -1436,6 +1493,8 @@ def create_app(
                 content_type=file.content_type,
                 lesson_tag=lesson_tag,
                 lecturer_notes=lecturer_notes,
+                gemini_api_key=header_api_key,
+                gemini_model_id=header_model,
             )
         except ValueError as exc:
             raise HTTPException(
@@ -1444,6 +1503,57 @@ def create_app(
         except RuntimeError as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+            ) from exc
+        except Exception as exc:
+            logger.exception("Unexpected error during video summarization: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Video summarization failed: {exc}",
+            ) from exc
+
+    @fastapi_app.post("/api/video/summarize-youtube", response_class=JSONResponse)
+    async def summarize_youtube_video_endpoint(
+        payload: SummarizeYoutubeVideoRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Lecturer-protected endpoint that passes a public YouTube video URL directly
+            to the Gemini API (`types.Part.from_uri(file_uri=youtube_url, mime_type="video/mp4")`)
+            and persists the structured lecture summary under `/video_summaries`.
+        Inputs:
+            payload (SummarizeYoutubeVideoRequest): Public YouTube URL, lesson tag, and optional notes.
+            request (Request): Incoming FastAPI request.
+        Outputs:
+            dict[str, Any]: Structured lecture video summary record.
+        """
+        svc: AuthService = request.app.state.auth_service
+        svc.require_lecturer_claims(request)
+
+        summarizer: VideoSummarizer = request.app.state.video_summarizer
+        header_api_key = request.headers.get("X-Gemini-Api-Key")
+        header_model = request.headers.get("X-Gemini-Model")
+        try:
+            return summarizer.summarize_video(
+                youtube_url=payload.youtube_url,
+                lesson_tag=payload.lesson_tag,
+                lecturer_notes=payload.lecturer_notes,
+                gemini_api_key=header_api_key,
+                gemini_model_id=header_model,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+            ) from exc
+        except Exception as exc:
+            logger.exception("Unexpected error during YouTube video summarization: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"YouTube video summarization failed: {exc}",
             ) from exc
 
     @fastapi_app.get("/api/video/summaries", response_class=JSONResponse)
@@ -1561,9 +1671,11 @@ def create_app(
         Outputs:
             dict[str, Any]: Gated submission confirmation receipt.
         """
-        caller = _resolve_caller_identity(request)
+        caller = _resolve_caller_identity(request, prefer_role="student")
         effective_id = (student_id or "").strip() or caller["id"]
         effective_name = (student_name or "").strip() or caller["name"]
+        header_api_key = request.headers.get("X-Gemini-Api-Key")
+        header_model = request.headers.get("X-Gemini-Model") or "gemini-3.5-flash-lite"
 
         reviewer: HomeworkReviewer = request.app.state.homework_reviewer
         try:
@@ -1573,6 +1685,9 @@ def create_app(
                     student_id=effective_id,
                     student_name=effective_name,
                     repo_url=repo_url.strip(),
+                    gemini_api_key=header_api_key,
+                    gemini_model_id=header_model,
+                    require_student_key=True,
                 )
             if file is None:
                 raise ValueError(
@@ -1586,6 +1701,9 @@ def create_app(
                 filename=file.filename or "",
                 pdf_bytes=pdf_bytes,
                 content_type=file.content_type,
+                gemini_api_key=header_api_key,
+                gemini_model_id=header_model,
+                require_student_key=True,
             )
         except PermissionError as exc:
             raise HTTPException(
@@ -1601,6 +1719,12 @@ def create_app(
         except RuntimeError as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+            ) from exc
+        except Exception as exc:
+            logger.exception("Unexpected error during homework submission: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Homework submission failed: {exc}",
             ) from exc
 
     @fastapi_app.post(
@@ -1623,9 +1747,11 @@ def create_app(
         Outputs:
             dict[str, Any]: Gated submission confirmation receipt.
         """
-        caller = _resolve_caller_identity(request)
+        caller = _resolve_caller_identity(request, prefer_role="student")
         effective_id = (payload.student_id or "").strip() or caller["id"]
         effective_name = (payload.student_name or "").strip() or caller["name"]
+        header_api_key = request.headers.get("X-Gemini-Api-Key")
+        header_model = request.headers.get("X-Gemini-Model") or "gemini-3.5-flash-lite"
 
         reviewer: HomeworkReviewer = request.app.state.homework_reviewer
         try:
@@ -1634,6 +1760,9 @@ def create_app(
                 student_id=effective_id,
                 student_name=effective_name,
                 repo_url=payload.repo_url,
+                gemini_api_key=header_api_key,
+                gemini_model_id=header_model,
+                require_student_key=True,
             )
         except PermissionError as exc:
             raise HTTPException(
@@ -1649,6 +1778,12 @@ def create_app(
         except RuntimeError as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+            ) from exc
+        except Exception as exc:
+            logger.exception("Unexpected error during Git repo homework submission: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Git repository homework submission failed: {exc}",
             ) from exc
 
     @fastapi_app.get(
@@ -1675,6 +1810,8 @@ def create_app(
         """
         caller = _resolve_caller_identity(request)
         target_student_id = (student_id or "").strip() or caller["id"]
+        header_api_key = request.headers.get("X-Gemini-Api-Key")
+        header_model = request.headers.get("X-Gemini-Model") or "gemini-3.5-flash-lite"
 
         reviewer: HomeworkReviewer = request.app.state.homework_reviewer
         try:
@@ -1682,14 +1819,25 @@ def create_app(
                 assignment_id=assignment_id,
                 student_id=target_student_id,
                 viewer_role=caller["role"],
+                gemini_api_key=header_api_key,
+                gemini_model_id=header_model,
             )
         except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
-            ) from exc
+            status_code = (
+                status.HTTP_404_NOT_FOUND
+                if "not found" in str(exc).lower() or "no homework" in str(exc).lower()
+                else status.HTTP_400_BAD_REQUEST
+            )
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+            ) from exc
+        except Exception as exc:
+            logger.exception("Unexpected error fetching homework review: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to retrieve homework review: {exc}",
             ) from exc
 
     return fastapi_app

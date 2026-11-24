@@ -15,14 +15,17 @@ Outputs:
 
 from __future__ import annotations
 
+import re
 import secrets
 import time
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from src.repository.firebase_repository import FirebaseRepository
 from src.services.gemini_client import GeminiClient
 
 ALLOWED_MP4_MIMES = {"video/mp4", "application/mp4", "application/octet-stream", ""}
+MAX_MP4_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB cap for direct MP4 upload
 
 
 class VideoSummarizer:
@@ -87,7 +90,61 @@ class VideoSummarizer:
         if not video_bytes or len(video_bytes) == 0:
             raise ValueError("Uploaded MP4 video file is empty.")
 
+        if len(video_bytes) > MAX_MP4_UPLOAD_BYTES:
+            size_mb = len(video_bytes) / (1024 * 1024)
+            raise ValueError(
+                f"MP4 file ({size_mb:.1f} MB) exceeds the 20 MB upload limit. "
+                "For longer recordings, please use the YouTube URL option or upload an MP4 clip <= 20 MB."
+            )
+
         return clean_name
+
+    @staticmethod
+    def validate_youtube_url(youtube_url: str) -> str:
+        """
+        Purpose:
+            Validate a public YouTube URL (`youtube.com/watch?v=...`, `youtu.be/...`,
+            `youtube.com/shorts/...`, `youtube.com/live/...`, `youtube.com/embed/...`)
+            and normalize it to `https://www.youtube.com/watch?v=<video_id>`.
+        Inputs:
+            youtube_url (str): Raw YouTube URL submitted by the Lecturer.
+        Outputs:
+            str: Canonical `https://www.youtube.com/watch?v=<video_id>` URL.
+            Raises `ValueError` if the URL is not a valid YouTube video link.
+        """
+        clean = (youtube_url or "").strip()
+        if not clean:
+            raise ValueError("A public YouTube URL is required.")
+
+        parsed = urlparse(clean)
+        host = parsed.netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host.startswith("m."):
+            host = host[2:]
+
+        video_id: str | None = None
+        if host == "youtu.be":
+            parts = [p for p in parsed.path.strip("/").split("/") if p]
+            if parts:
+                video_id = parts[0]
+        elif host in {"youtube.com", "youtube-nocookie.com"}:
+            path_parts = [p for p in parsed.path.strip("/").split("/") if p]
+            if not path_parts or path_parts[0] == "watch":
+                qs = parse_qs(parsed.query)
+                v_list = qs.get("v", [])
+                if v_list:
+                    video_id = v_list[0]
+            elif len(path_parts) >= 2 and path_parts[0] in {"shorts", "embed", "live", "v"}:
+                video_id = path_parts[1]
+
+        if not video_id or not re.match(r"^[A-Za-z0-9_-]{6,20}$", video_id):
+            raise ValueError(
+                "Invalid YouTube URL. Please provide a valid public YouTube link "
+                "(e.g., https://www.youtube.com/watch?v=... or https://youtu.be/...)."
+            )
+
+        return f"https://www.youtube.com/watch?v={video_id}"
 
     @staticmethod
     def _build_prompt(
@@ -129,42 +186,71 @@ class VideoSummarizer:
 
     def summarize_video(
         self,
-        filename: str,
-        video_bytes: bytes,
+        filename: str = "",
+        video_bytes: bytes = b"",
         content_type: str | None = "video/mp4",
         lesson_tag: str = "Lesson 1",
         lecturer_notes: str = "",
+        youtube_url: str | None = None,
+        gemini_api_key: str | None = None,
+        gemini_model_id: str | None = None,
     ) -> dict[str, Any]:
         """
         Purpose:
-            Validate an uploaded `.mp4` lecture video, upload and analyze the full video
-            via `GeminiClient` (using the Gemini Files API), and persist the structured
-            summary in Firebase RTDB under `/video_summaries/{id}`.
+            Validate and analyze either a public YouTube URL (passed directly to Gemini via
+            `Part.from_uri(file_uri=youtube_url, mime_type="video/mp4")`) OR an uploaded `.mp4`
+            lecture file (`<= 20 MB`, uploaded via the Gemini Files API / Vertex inline part),
+            and persist the structured summary in Firebase RTDB under `/video_summaries/{id}`.
         Inputs:
-            filename (str): Uploaded `.mp4` filename (supports Hebrew/Unicode filenames).
-            video_bytes (bytes): Binary MP4 content.
+            filename (str): Uploaded `.mp4` filename (when uploading a file).
+            video_bytes (bytes): Binary MP4 content (when uploading a file).
             content_type (str | None): Multipart MIME type.
             lesson_tag (str): Associated lesson tag (e.g., `"Lesson 1"`).
             lecturer_notes (str): Optional context notes from the lecturer.
+            youtube_url (str | None): Optional public YouTube URL to analyze directly.
+            gemini_api_key (str | None): Optional BYOK API key override from request header.
+            gemini_model_id (str | None): Optional BYOK model ID override from request header.
         Outputs:
             dict[str, Any]: Persisted structured lecture video summary record.
-            Raises `ValueError` for invalid files or `RuntimeError` if Gemini fails.
+            Raises `ValueError` for invalid inputs or `RuntimeError` if Gemini fails.
         """
-        clean_filename = self.validate_mp4_upload(filename, video_bytes, content_type)
         clean_tag = (lesson_tag or "Lesson 1").strip() or "Lesson 1"
-        size_kb = round(len(video_bytes) / 1024.0, 2)
 
-        prompt = self._build_prompt(
-            filename=clean_filename,
-            lesson_tag=clean_tag,
-            lecturer_notes=lecturer_notes,
-            size_kb=size_kb,
-        )
-        generated = self.gemini_client.generate_structured_json(
-            prompt=prompt,
-            media_bytes=video_bytes,
-            mime_type="video/mp4",
-        )
+        if youtube_url and youtube_url.strip():
+            canonical_yt = self.validate_youtube_url(youtube_url.strip())
+            clean_filename = canonical_yt
+            size_kb = 0.0
+            source_type = "youtube"
+            prompt = self._build_prompt(
+                filename=canonical_yt,
+                lesson_tag=clean_tag,
+                lecturer_notes=lecturer_notes,
+                size_kb=size_kb,
+            )
+            generated = self.gemini_client.generate_structured_json(
+                prompt=prompt,
+                file_uri=canonical_yt,
+                mime_type="video/mp4",
+                api_key_override=gemini_api_key,
+                model_id_override=gemini_model_id,
+            )
+        else:
+            clean_filename = self.validate_mp4_upload(filename, video_bytes, content_type)
+            size_kb = round(len(video_bytes) / 1024.0, 2)
+            source_type = "mp4"
+            prompt = self._build_prompt(
+                filename=clean_filename,
+                lesson_tag=clean_tag,
+                lecturer_notes=lecturer_notes,
+                size_kb=size_kb,
+            )
+            generated = self.gemini_client.generate_structured_json(
+                prompt=prompt,
+                media_bytes=video_bytes,
+                mime_type="video/mp4",
+                api_key_override=gemini_api_key,
+                model_id_override=gemini_model_id,
+            )
 
         now_ts = int(time.time())
         summary_id = f"vid_{now_ts}_{secrets.token_hex(4)}"
@@ -187,6 +273,8 @@ class VideoSummarizer:
         record: dict[str, Any] = {
             "summary_id": summary_id,
             "filename": clean_filename,
+            "source_type": source_type,
+            "youtube_url": clean_filename if source_type == "youtube" else None,
             "file_size_kb": size_kb,
             "lesson_tag": clean_tag,
             "lecturer_notes": (lecturer_notes or "").strip(),
@@ -200,7 +288,7 @@ class VideoSummarizer:
                 "audio_quality": str(delivery.get("audio_quality", "Clear audio track.")),
                 "overall_rating": str(delivery.get("overall_rating", "Excellent")),
             },
-            "model_used": str(generated.get("model_used", "gemini-2.5-flash")),
+            "model_used": str(generated.get("model_used", "gemini-3.5-flash-lite")),
             "provider": str(generated.get("provider", "gemini_live")),
             "created_at": now_ts,
         }

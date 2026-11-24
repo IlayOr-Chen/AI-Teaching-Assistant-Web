@@ -56,16 +56,16 @@ def test_app_config_defaults_and_env_loading(monkeypatch: pytest.MonkeyPatch) ->
     Outputs:
         None.
     """
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
     monkeypatch.setenv("USE_MOCK_FIREBASE", "true")
     monkeypatch.setenv("QR_ROTATION_SECONDS", "15")
     monkeypatch.setenv("DEVICE_COOLDOWN_MINUTES", "15")
-    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 
     cfg = AppConfig.from_env()
     assert cfg.use_mock_firebase is True
     assert cfg.qr_rotation_seconds == 15
     assert cfg.device_cooldown_minutes == 15
-    assert cfg.gemini_model == "gemini-2.5-flash-lite"
+    assert cfg.gemini_model == "gemini-3.5-flash-lite"
     assert "ai-teaching-assistant-web-default-rtdb.firebaseio.com" in cfg.firebase_db_url
 
 

@@ -38,7 +38,15 @@ import httpx
 from pypdf import PdfReader
 
 from src.repository.firebase_repository import FirebaseRepository
-from src.services.gemini_client import GeminiClient
+from src.services.gemini_client import (
+    DEFAULT_GEMINI_MODEL,
+    PLACEHOLDER_KEYS,
+    GeminiClient,
+)
+
+MISSING_STUDENT_GEMINI_KEY_ERROR = (
+    "Please enter your Gemini API Key before submitting homework for AI review."
+)
 
 SUPPORTED_TEXT_CODE_EXTENSIONS = {
     ".txt",
@@ -318,24 +326,40 @@ class HomeworkReviewer:
                 page_count = max(1, len(reader.pages))
                 page_texts: list[str] = []
                 for page in reader.pages:
-                    txt = page.extract_text() or ""
+                    try:
+                        txt = page.extract_text() or ""
+                    except Exception:
+                        txt = ""
                     if txt.strip():
                         page_texts.append(txt.strip())
-                extracted_text = "\n\n".join(page_texts)[:MAX_EXTRACTED_CHARS].strip()
+                raw_extracted = "\n\n".join(page_texts)[:MAX_EXTRACTED_CHARS].strip()
+                extracted_text = raw_extracted.encode("utf-8", errors="replace").decode("utf-8")
+                if not extracted_text:
+                    extracted_text = (
+                        f"[PDF document '{clean_name}' ({page_count} page(s), {len(pdf_bytes)} bytes) "
+                        "— visual/scanned or non-standard font layer]"
+                    )
             except Exception as exc:
                 raise ValueError(f"Failed to parse PDF document: {exc}") from exc
         elif ext == ".docx":
-            extracted_text = cls._extract_docx_text(pdf_bytes)[:MAX_EXTRACTED_CHARS]
+            raw_docx = cls._extract_docx_text(pdf_bytes)[:MAX_EXTRACTED_CHARS]
+            extracted_text = raw_docx.encode("utf-8", errors="replace").decode("utf-8")
             page_count = max(1, round(len(extracted_text.splitlines()) / 40) or 1)
         elif ext == ".zip":
-            extracted_text, file_count = cls._extract_zip_text(pdf_bytes, source_label=clean_name)
+            raw_zip, file_count = cls._extract_zip_text(pdf_bytes, source_label=clean_name)
+            extracted_text = raw_zip.encode("utf-8", errors="replace").decode("utf-8")
             page_count = max(1, file_count)
         else:
             if b"\x00" in pdf_bytes[:1024]:
                 raise ValueError(
                     f"Binary content detected in text/code file '{clean_name}'. Please upload a valid UTF-8 text or source code file."
                 )
-            extracted_text = pdf_bytes.decode("utf-8", errors="replace")[:MAX_EXTRACTED_CHARS].strip()
+            extracted_text = (
+                pdf_bytes.decode("utf-8", errors="replace")[:MAX_EXTRACTED_CHARS]
+                .encode("utf-8", errors="replace")
+                .decode("utf-8")
+                .strip()
+            )
             if not extracted_text:
                 raise ValueError(f"Uploaded file '{clean_name}' contains no readable text.")
             page_count = max(1, round(len(extracted_text.splitlines()) / 45) or 1)
@@ -509,7 +533,7 @@ class HomeworkReviewer:
         Outputs:
             dict[str, Any]: Updated assignment overview dictionary (`review_released=True`).
         """
-        clean_id = (assignment_id or "").strip()
+        clean_id = re.sub(r"[.$#\[\]/]", "_", (assignment_id or "").strip())
         raw = self.repository.get(f"/homework_assignments/{clean_id}")
         if not isinstance(raw, dict):
             raise ValueError(f"Homework assignment '{clean_id}' was not found.")
@@ -526,6 +550,9 @@ class HomeworkReviewer:
         assignment: dict[str, Any],
         target_submission: dict[str, Any],
         all_submissions: dict[str, dict[str, Any]],
+        gemini_api_key: str | None = None,
+        gemini_model_id: str | None = None,
+        allow_stored_key: bool = True,
     ) -> dict[str, Any]:
         """
         Purpose:
@@ -536,6 +563,9 @@ class HomeworkReviewer:
             assignment (dict[str, Any]): Homework assignment dictionary.
             target_submission (dict[str, Any]): The target student's submission record.
             all_submissions (dict[str, dict[str, Any]]): Map of all submissions for the assignment.
+            gemini_api_key (str | None): Optional BYOK API key override from request header.
+            gemini_model_id (str | None): Optional BYOK model ID override from request header.
+            allow_stored_key (bool): Whether to fall back to Lecturer/env key when override is omitted.
         Outputs:
             dict[str, Any]: Dedicated Peer Comparison payload for the right-hand UI column.
         """
@@ -577,7 +607,13 @@ class HomeworkReviewer:
             f"Peer excerpts:\n{peer_summaries}"
         )
 
-        generated = self.gemini_client.generate_structured_json(prompt=prompt)
+        generated = self.gemini_client.generate_structured_json(
+            prompt=prompt,
+            api_key_override=gemini_api_key,
+            model_id_override=gemini_model_id,
+            allow_stored_key=allow_stored_key,
+            missing_key_error=MISSING_STUDENT_GEMINI_KEY_ERROR,
+        )
 
         return {
             "total_submissions": total_subs,
@@ -599,17 +635,18 @@ class HomeworkReviewer:
         content_type: str | None = "application/pdf",
         now_ts: int | None = None,
         repo_url: str | None = None,
+        gemini_api_key: str | None = None,
+        gemini_model_id: str | None = None,
+        require_student_key: bool = False,
     ) -> dict[str, Any]:
         """
         Purpose:
-            Validate, analyze via Gemini, and store a student's homework submission
+            Validate, analyze via Gemini (using per-student BYOK credentials when
+            `require_student_key=True`), and store a student's homework submission
             (either a multi-format file `.pdf`/`.docx`/`.txt`/`.md`/`.zip`/code OR a
             public GitHub repository URL `repo_url`) under
             `/homework_assignments/{assignment_id}/submissions/{student_id}`.
-            Strictly enforces the Gated Release Rule:
-            - Rejects submissions after the deadline or after "End Submission Now" (`PermissionError`).
-            - While submissions are open, stores the Gemini review internally but WITHHOLDS
-              (`review=None`, `peer_comparison=None`) from the student response.
+            Strictly enforces the Gated Release Rule and never falls back to mock/env keys.
         Inputs:
             assignment_id (str): Target homework assignment ID.
             student_id (str): Submitting student ID.
@@ -619,11 +656,14 @@ class HomeworkReviewer:
             content_type (str | None): Multipart HTTP MIME type.
             now_ts (int | None): Optional UNIX timestamp override for deterministic tests.
             repo_url (str | None): Optional public GitHub repository URL (when submitting a Git repo).
+            gemini_api_key (str | None): Student's BYOK Gemini API key (`X-Gemini-Api-Key`).
+            gemini_model_id (str | None): Student's preferred Gemini model (`X-Gemini-Model`).
+            require_student_key (bool): When True, rejects missing student key with ValueError (400).
         Outputs:
             dict[str, Any]: Gated submission confirmation receipt (`review_released=False`).
         """
-        clean_aid = (assignment_id or "").strip()
-        clean_sid = (student_id or "").strip()
+        clean_aid = re.sub(r"[.$#\[\]/]", "_", (assignment_id or "").strip())
+        clean_sid = re.sub(r"[.$#\[\]/]", "_", (student_id or "").strip())
         if not clean_sid:
             raise ValueError("student_id is required to submit homework.")
 
@@ -637,21 +677,39 @@ class HomeworkReviewer:
                 "Submissions are closed for this assignment (deadline has passed or the lecturer ended submissions)."
             )
 
+        clean_byok_key = (gemini_api_key or "").strip()
+        if require_student_key and (
+            not clean_byok_key or clean_byok_key.lower() in PLACEHOLDER_KEYS
+        ):
+            raise ValueError(MISSING_STUDENT_GEMINI_KEY_ERROR)
+
+        clean_byok_model = (gemini_model_id or "").strip() or DEFAULT_GEMINI_MODEL
+
         if repo_url and repo_url.strip():
             extracted_info = self.extract_public_git_repo_text(repo_url.strip())
+            pdf_media_bytes = None
+            pdf_mime_type = None
         else:
             extracted_info = self.validate_and_extract_pdf_text(
                 filename=filename,
                 pdf_bytes=pdf_bytes,
                 content_type=content_type,
             )
+            is_pdf = str(extracted_info.get("submission_type")) == "file:pdf"
+            pdf_media_bytes = (
+                pdf_bytes
+                if is_pdf and pdf_bytes and len(pdf_bytes) <= 18 * 1024 * 1024
+                else None
+            )
+            pdf_mime_type = "application/pdf" if pdf_media_bytes else None
 
         title = str(raw_assignment.get("title", clean_aid))
         description = str(raw_assignment.get("description", ""))
         prompt = (
             "You are an expert university Software Engineering AI Teaching Assistant reviewing a student's "
-            f"homework submission for '{title}' ({description}). Carefully analyze the actual submitted "
-            "content below and return ONLY a valid JSON object with keys:\n"
+            f"homework submission for '{title}' ({description}). Even if the student's document or code comments "
+            "are in Hebrew, write your entire review in clear, constructive English based strictly on the "
+            "actual submitted content. Return ONLY a valid JSON object with keys:\n"
             '- "brief_summary": string (2-3 sentences summarizing the submission and its quality)\n'
             '- "strengths": list of 3 specific strength strings observed in the submission\n'
             '- "areas_to_improve": list of 2-3 specific areas to improve\n'
@@ -660,7 +718,15 @@ class HomeworkReviewer:
             f"Submission Source: {extracted_info['filename']} ({extracted_info['word_count']} words)\n"
             f"Extracted Submission Content:\n{extracted_info['extracted_text'][:18_000]}"
         )
-        generated_review = self.gemini_client.generate_structured_json(prompt=prompt)
+        generated_review = self.gemini_client.generate_structured_json(
+            prompt=prompt,
+            media_bytes=pdf_media_bytes,
+            mime_type=pdf_mime_type,
+            api_key_override=clean_byok_key if require_student_key else gemini_api_key,
+            model_id_override=clean_byok_model,
+            allow_stored_key=not require_student_key,
+            missing_key_error=MISSING_STUDENT_GEMINI_KEY_ERROR,
+        )
 
         submission_record: dict[str, Any] = {
             "assignment_id": clean_aid,
@@ -671,7 +737,7 @@ class HomeworkReviewer:
             "repo_url": extracted_info.get("repo_url"),
             "page_count": extracted_info["page_count"],
             "word_count": extracted_info["word_count"],
-            "extracted_text": extracted_info["extracted_text"],
+            "extracted_text": extracted_info["extracted_text"][:25_000],
             "submitted_at": current_ts,
             "review": {
                 "brief_summary": str(generated_review.get("brief_summary", "")),
@@ -681,7 +747,7 @@ class HomeworkReviewer:
                     generated_review.get("actionable_recommendations", [])
                 ),
                 "model_used": str(
-                    generated_review.get("model_used", "gemini-2.5-flash")
+                    generated_review.get("model_used", DEFAULT_GEMINI_MODEL)
                 ),
             },
         }
@@ -714,6 +780,8 @@ class HomeworkReviewer:
         student_id: str,
         viewer_role: str = "student",
         now_ts: int | None = None,
+        gemini_api_key: str | None = None,
+        gemini_model_id: str | None = None,
     ) -> dict[str, Any]:
         """
         Purpose:
@@ -726,11 +794,13 @@ class HomeworkReviewer:
             student_id (str): Target student ID.
             viewer_role (str): `"student"` or `"lecturer"`.
             now_ts (int | None): Optional UNIX timestamp override for deterministic tests.
+            gemini_api_key (str | None): Optional BYOK API key override from request header.
+            gemini_model_id (str | None): Optional BYOK model ID override from request header.
         Outputs:
             dict[str, Any]: Review + Peer Comparison payload (or gated lock payload if still open).
         """
-        clean_aid = (assignment_id or "").strip()
-        clean_sid = (student_id or "").strip()
+        clean_aid = re.sub(r"[.$#\[\]/]", "_", (assignment_id or "").strip())
+        clean_sid = re.sub(r"[.$#\[\]/]", "_", (student_id or "").strip())
         raw_assignment = self.repository.get(f"/homework_assignments/{clean_aid}")
         if not isinstance(raw_assignment, dict):
             raise ValueError(f"Homework assignment '{clean_aid}' was not found.")
@@ -742,7 +812,7 @@ class HomeworkReviewer:
         target_sub = subs_map.get(clean_sid)
         if not isinstance(target_sub, dict):
             raise ValueError(
-                f"No PDF submission found for student '{clean_sid}' in assignment '{clean_aid}'."
+                f"No homework submission found for student '{clean_sid}' in assignment '{clean_aid}'."
             )
 
         released = self.is_review_released(raw_assignment, now_ts=now_ts)
@@ -764,10 +834,19 @@ class HomeworkReviewer:
                 "peer_comparison": None,
             }
 
+        allow_stored = viewer_role == "lecturer"
+        if viewer_role == "student" and not gemini_api_key and self.gemini_client._transport is None:
+            # Avoid blocking if there is only 1 submission (First-Submission Edge Case needs no Gemini call)
+            if len(subs_map) > 1:
+                raise ValueError(MISSING_STUDENT_GEMINI_KEY_ERROR)
+
         peer_comparison = self._generate_peer_comparison(
             assignment=raw_assignment,
             target_submission=target_sub,
             all_submissions=subs_map,
+            gemini_api_key=gemini_api_key,
+            gemini_model_id=gemini_model_id,
+            allow_stored_key=allow_stored or self.gemini_client._transport is not None,
         )
         return {
             "assignment_id": clean_aid,

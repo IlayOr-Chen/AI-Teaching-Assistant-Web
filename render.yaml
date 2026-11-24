@@ -37,7 +37,7 @@ services:
       - key: GEOFENCE_RADIUS_METERS
         value: "100"
       - key: GEMINI_MODEL
-        value: gemini-2.5-flash
+        value: gemini-3.5-flash-lite
       - key: GEMINI_API_KEY
         sync: false
       - key: YOLO_MODEL_PATH
