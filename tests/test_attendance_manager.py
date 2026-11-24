@@ -142,12 +142,6 @@ def test_rotating_qr_token_generation_and_expiration(
         classroom_lat=CLASSROOM_LAT,
         classroom_lng=CLASSROOM_LNG,
     )
-    manager.start_session(
-        lesson_id="lesson_2",
-        lesson_title="Lesson 2: Design Patterns",
-        classroom_lat=CLASSROOM_LAT,
-        classroom_lng=CLASSROOM_LNG,
-    )
 
     qr1 = manager.generate_rotating_qr_token("lesson_1", base_url="https://ta.example.com")
     qr2 = manager.generate_rotating_qr_token("lesson_1", base_url="https://ta.example.com")
@@ -746,3 +740,38 @@ def test_strict_geofence_radii_30m_50m_100m_enforcement(
 
     report_after_accept = lec_client.get(f"/api/attendance/sessions/{lesson_id}").json()
     assert report_after_accept["present_count"] == 1
+
+
+def test_multi_lesson_switching_and_opening_new_lesson(
+    attendance_env: tuple[AppConfig, FirebaseRepository, AttendanceManager]
+) -> None:
+    """
+    Purpose:
+        Verify that the Lecturer can create and open multiple lessons (`lesson_1`, `lesson_2`, etc.)
+        and switch back and forth between existing lessons: starting or reopening a lesson
+        automatically makes it the single active LIVE session while preserving previously
+        recorded attendance on all lessons.
+    Inputs:
+        attendance_env: Isolated attendance test fixture.
+    Outputs:
+        None.
+    """
+    _, _, manager = attendance_env
+
+    # 1. Start Lesson 1 and mark Alice present
+    s1 = manager.start_session("lesson_1", "Lesson 1: Intro", classroom_lat=CLASSROOM_LAT, classroom_lng=CLASSROOM_LNG)
+    assert s1["active"] is True
+    manager.set_manual_attendance("lesson_1", "stu_alice", "present")
+
+    # 2. Create & open Lesson 2 -> Lesson 1 is automatically deactivated, Lesson 2 is LIVE
+    s2 = manager.start_session("lesson_2", "Lesson 2: Design Patterns", classroom_lat=CLASSROOM_LAT, classroom_lng=CLASSROOM_LNG)
+    assert s2["active"] is True
+    assert manager.get_session("lesson_1")["active"] is False
+    assert manager.get_session("lesson_2")["active"] is True
+
+    # 3. Switch back to / reopen Lesson 1 -> Lesson 2 is deactivated, Lesson 1 is LIVE with Alice still present
+    s1_reopened = manager.start_session("lesson_1", "Lesson 1: Intro", classroom_lat=CLASSROOM_LAT, classroom_lng=CLASSROOM_LNG)
+    assert s1_reopened["active"] is True
+    assert manager.get_session("lesson_2")["active"] is False
+    report_l1 = manager.get_lesson_attendance_report("lesson_1")
+    assert report_l1["present_count"] == 1

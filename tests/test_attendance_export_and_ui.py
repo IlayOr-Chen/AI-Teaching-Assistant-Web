@@ -198,7 +198,7 @@ def test_attendance_management_and_yolo_ui_wiring() -> None:
     assert js_res.status_code == 200
     for expected in (
         "renderRosterAndHeadcountTab",
-        "Roster & YOLO Headcount",
+        "label: 'Roster'",
         "Export CSV (.csv)",
         "Export Excel (.xlsx)",
         "Test on Classroom Photo (p3.jpeg)",

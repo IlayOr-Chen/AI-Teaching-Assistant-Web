@@ -234,6 +234,22 @@ class AttendanceManager:
             existing.get("yolo_headcount") if isinstance(existing, dict) else None
         )
 
+        # Deactivate any other currently active lesson sessions so the newly opened
+        # or reopened lesson becomes the single active LIVE session cleanly.
+        all_sessions = self.repository.get("/attendance_sessions")
+        if isinstance(all_sessions, dict):
+            now_close_ts = int(time.time())
+            for other_id, other_data in all_sessions.items():
+                if (
+                    other_id != clean_id
+                    and isinstance(other_data, dict)
+                    and other_data.get("active", False)
+                ):
+                    self.repository.update(
+                        f"/attendance_sessions/{other_id}",
+                        {"active": False, "closed_at": now_close_ts, "qr_token": ""},
+                    )
+
         enforce_flag = (
             enforce_geofence
             if enforce_geofence is not None

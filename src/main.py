@@ -300,7 +300,7 @@ class UpdateGeminiSettingsRequest(BaseModel):
 class CreateHomeworkAssignmentRequest(BaseModel):
     """
     Purpose:
-        Pydantic schema for creating a PDF homework assignment with a submission deadline.
+        Pydantic schema for creating a homework assignment with a submission deadline.
     Inputs:
         title (str), description (str), deadline_ts (int), lesson_tag (str).
     Outputs:
@@ -311,6 +311,21 @@ class CreateHomeworkAssignmentRequest(BaseModel):
     description: str = ""
     deadline_ts: int
     lesson_tag: str = "Lesson 1"
+
+
+class SubmitHomeworkRepoRequest(BaseModel):
+    """
+    Purpose:
+        Pydantic schema for submitting a public GitHub / Git repository URL for homework review.
+    Inputs:
+        repo_url (str), student_id (str | None), student_name (str | None).
+    Outputs:
+        Validated `SubmitHomeworkRepoRequest` instance.
+    """
+
+    repo_url: str
+    student_id: str | None = None
+    student_name: str | None = None
 
 
 def create_app(
@@ -1426,6 +1441,10 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             ) from exc
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+            ) from exc
 
     @fastapi_app.get("/api/video/summaries", response_class=JSONResponse)
     async def list_video_summaries_endpoint(request: Request) -> dict[str, Any]:
@@ -1521,20 +1540,22 @@ def create_app(
     async def submit_homework_pdf_endpoint(
         assignment_id: str,
         request: Request,
-        file: UploadFile = File(...),
+        file: UploadFile | None = File(default=None),
+        repo_url: str | None = Query(default=None),
         student_id: str | None = Query(default=None),
         student_name: str | None = Query(default=None),
     ) -> dict[str, Any]:
         """
         Purpose:
-            Student PDF homework submission endpoint enforcing:
-            1) Strict `.pdf` file extension, MIME type, and `%PDF` header validation,
-            2) Open submission deadline check (rejects uploads after deadline or "End Submission Now"),
-            3) Gated Release Rule (withholds AI review and peer comparison while submissions remain open).
+            Student homework submission endpoint supporting both multi-format file uploads
+            (`.pdf`, `.docx`, `.txt`, `.md`, `.zip`, `.py`, `.java`, `.c`, `.cpp`, `.h`,
+            `.js`, `.ts`, `.html`, `.css`, `.json`) and public GitHub repository URLs (`repo_url`),
+            while enforcing the deadline check and Gated Release Rule.
         Inputs:
             assignment_id (str): Target homework assignment ID.
             request (Request): Incoming FastAPI request.
-            file (UploadFile): Uploaded `.pdf` homework file.
+            file (UploadFile | None): Uploaded homework file.
+            repo_url (str | None): Optional public GitHub repository URL.
             student_id (str | None): Optional student ID override.
             student_name (str | None): Optional student display name override.
         Outputs:
@@ -1546,6 +1567,17 @@ def create_app(
 
         reviewer: HomeworkReviewer = request.app.state.homework_reviewer
         try:
+            if repo_url and repo_url.strip():
+                return reviewer.submit_homework_pdf(
+                    assignment_id=assignment_id,
+                    student_id=effective_id,
+                    student_name=effective_name,
+                    repo_url=repo_url.strip(),
+                )
+            if file is None:
+                raise ValueError(
+                    "Please upload a supported homework file or provide a public Git repository URL."
+                )
             pdf_bytes = await file.read()
             return reviewer.submit_homework_pdf(
                 assignment_id=assignment_id,
@@ -1566,6 +1598,58 @@ def create_app(
                 else status.HTTP_400_BAD_REQUEST
             )
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+            ) from exc
+
+    @fastapi_app.post(
+        "/api/homework/assignments/{assignment_id}/submit-repo",
+        response_class=JSONResponse,
+    )
+    async def submit_homework_repo_endpoint(
+        assignment_id: str,
+        payload: SubmitHomeworkRepoRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Student endpoint for submitting a public GitHub / Git repository URL
+            for homework review under the Gated Release Rule.
+        Inputs:
+            assignment_id (str): Target homework assignment ID.
+            payload (SubmitHomeworkRepoRequest): Public repository URL and optional student identity.
+            request (Request): Incoming FastAPI request.
+        Outputs:
+            dict[str, Any]: Gated submission confirmation receipt.
+        """
+        caller = _resolve_caller_identity(request)
+        effective_id = (payload.student_id or "").strip() or caller["id"]
+        effective_name = (payload.student_name or "").strip() or caller["name"]
+
+        reviewer: HomeworkReviewer = request.app.state.homework_reviewer
+        try:
+            return reviewer.submit_homework_pdf(
+                assignment_id=assignment_id,
+                student_id=effective_id,
+                student_name=effective_name,
+                repo_url=payload.repo_url,
+            )
+        except PermissionError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)
+            ) from exc
+        except ValueError as exc:
+            status_code = (
+                status.HTTP_404_NOT_FOUND
+                if "not found" in str(exc).lower()
+                else status.HTTP_400_BAD_REQUEST
+            )
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+            ) from exc
 
     @fastapi_app.get(
         "/api/homework/assignments/{assignment_id}/review",
@@ -1602,6 +1686,10 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+            ) from exc
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
             ) from exc
 
     return fastapi_app

@@ -88,6 +88,16 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
             "renderLecturerAuth",
             "renderLecturerDashboard",
             "buildQrDisplay",
+            "Enter your email",
+            "label: 'Overview'",
+            "label: 'Attendance'",
+            "label: 'Roster'",
+            "label: 'Polls'",
+            "label: 'Comments'",
+            "label: 'Video AI'",
+            "label: 'Homework'",
+            "Select Existing Lesson or Open a New Lesson",
+            "Switch / Open Another Lesson",
             "Sync from Course Excel",
             "Reset 15-Min Device Cooldowns",
             "Use My Current Location",
@@ -108,7 +118,9 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
         assert "javascript" in content_type, f"Unexpected content-type for {path}: {content_type}"
         for token in expected_tokens:
             assert token in res.text, f"Expected '{token}' in {path}"
-    # Confirm public lecturer self-registration UI was removed from lecturer.js
+    # Confirm public lecturer self-registration UI and email placeholder leak were removed from lecturer.js
     lec_js = ui_client.get("/static/js/lecturer.js").text
     assert "Create lecturer account" not in lec_js
     assert "/api/auth/lecturer/register" not in lec_js
+    assert "adminL@gmail.com" not in lec_js
+    assert "QR rotates every" not in lec_js

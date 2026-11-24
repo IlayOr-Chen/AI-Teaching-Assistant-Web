@@ -1,14 +1,16 @@
 """
 Purpose:
-    Implements `VideoSummarizer` for Feature 4 (ML Lecture Video Summary — MP4 Only + Gemini)
+    Implements `VideoSummarizer` for Feature 4 (ML Lecture Video Summary — MP4 Only + Gemini Files API)
     persisted in Firebase Realtime Database under `/video_summaries`. Enforces strict `.mp4`
-    file extension and MIME type validation and generates a concise, structured teaching
-    summary (Executive Summary, Key Topics, Core Takeaways, Action Items, and Lecturer
+    file extension and MIME type validation, uploads the full MP4 recording via `GeminiClient`
+    (using the official `google-genai` Files API so large >100 MB lectures are analyzed in full),
+    and generates an accurate structured English summary of the actual spoken and visual content
+    of the lecture (Executive Summary, Key Topics, Core Takeaways, Action Items, and Lecturer
     Delivery Insights on pacing, clarity, and audio quality).
 Inputs:
     `FirebaseRepository` persistence instance and `GeminiClient` AI wrapper.
 Outputs:
-    `VideoSummarizer` class managing MP4 validation, Gemini summarization, and persistence.
+    `VideoSummarizer` class managing MP4 validation, real Gemini Files API summarization, and persistence.
 """
 
 from __future__ import annotations
@@ -27,8 +29,10 @@ class VideoSummarizer:
     """
     Purpose:
         Domain service that validates uploaded `.mp4` lecture videos, invokes
-        `GeminiClient` to produce a structured pedagogical & delivery summary,
-        and stores results in Firebase RTDB (`/video_summaries`).
+        `GeminiClient` (via the Gemini Files API) to analyze the actual spoken and visual
+        lecture content, and stores structured summaries in Firebase RTDB (`/video_summaries`).
+        Contains zero fake or hardcoded fallback summaries: any missing API key or Gemini API
+        failure raises a clear error surfaced directly to the Lecturer UI.
     Inputs:
         repository (FirebaseRepository): Firebase RTDB persistence layer.
         gemini_client (GeminiClient): Configured Gemini AI client.
@@ -91,8 +95,9 @@ class VideoSummarizer:
     ) -> str:
         """
         Purpose:
-            Construct the structured Gemini instruction prompt requesting a concise,
-            high-value pedagogical and delivery summary in strict JSON format.
+            Construct the structured Gemini instruction prompt requesting an accurate,
+            content-faithful English summary of the actual spoken audio and visual slides
+            in the uploaded MP4 lecture recording.
         Inputs:
             filename (str): Uploaded MP4 filename.
             lesson_tag (str): Lesson tag (e.g., `"Lesson 2"`).
@@ -101,78 +106,26 @@ class VideoSummarizer:
         Outputs:
             str: Prompt string for `GeminiClient`.
         """
+        notes_clause = (
+            f"\nOptional Lecturer Context Notes: {lecturer_notes.strip()}"
+            if lecturer_notes and lecturer_notes.strip()
+            else ""
+        )
         return (
-            "You are an expert university Software Engineering AI Teaching Assistant. "
-            "Analyze this MP4 lecture recording and produce a concise, structured JSON summary "
-            "that improves upon verbose Zoom auto-summaries. Return ONLY a JSON object with keys:\n"
-            '- "executive_summary": string (2-3 crisp sentences)\n'
-            '- "key_topics": list of 3-5 concise topic strings\n'
-            '- "core_takeaways": list of 3-5 concrete student learning takeaways\n'
-            '- "action_items": list of 3-4 actionable next steps for students and lecturer\n'
+            "You are an expert university AI Teaching Assistant. Carefully analyze the ACTUAL "
+            "spoken audio, slides, code, mathematical proofs, and visual demonstrations inside "
+            "this uploaded MP4 lecture recording. Even if the lecturer speaks in Hebrew or another "
+            "language, write your entire output in clear, accurate English based strictly on the real "
+            "subject matter taught in the video. Never invent topics that are not in the video.\n"
+            "Return ONLY a valid JSON object with these exact keys:\n"
+            '- "executive_summary": string (2-4 crisp sentences summarizing what was actually taught in this video)\n'
+            '- "key_topics": list of 3-6 specific topics, algorithms, or concepts covered in the video\n'
+            '- "core_takeaways": list of 3-5 concrete student learning takeaways from the lecture\n'
+            '- "action_items": list of 2-4 actionable practice steps or review tasks for students based on the lecture\n'
             '- "delivery_insights": object with keys "pacing", "clarity", "audio_quality", '
-            'and "overall_rating" ("Excellent" | "Good" | "Needs Attention").\n'
-            f"Metadata: file='{filename}' ({size_kb:.1f} KB), lesson='{lesson_tag}', "
-            f"context='{lecturer_notes}'."
+            'and "overall_rating" ("Excellent" | "Good" | "Needs Attention") evaluating the lecturer\'s actual delivery in the recording.\n'
+            f"Recording filename: '{filename}' ({size_kb:.1f} KB), Lesson Tag: '{lesson_tag}'.{notes_clause}"
         )
-
-    @staticmethod
-    def _build_fallback_summary(
-        filename: str, lesson_tag: str, lecturer_notes: str, size_kb: float
-    ) -> dict[str, Any]:
-        """
-        Purpose:
-            Provide a deterministic, structured teaching and delivery summary when
-            running offline or in automated tests without a live external Gemini key.
-        Inputs:
-            filename (str): Uploaded MP4 filename.
-            lesson_tag (str): Lesson identifier tag.
-            lecturer_notes (str): Optional context notes.
-            size_kb (float): Uploaded MP4 size in KB.
-        Outputs:
-            dict[str, Any]: Structured teaching summary dictionary.
-        """
-        topic_hint = (
-            f" ({lecturer_notes.strip()})" if lecturer_notes and lecturer_notes.strip() else ""
-        )
-        return {
-            "executive_summary": (
-                f"Concise teaching recap for {lesson_tag} ({filename}{topic_hint}): "
-                "The session focused on KISS object-oriented software design, explicit Happy Case "
-                "vs. Edge Case analysis, and practical classroom verification over overly complex "
-                "theoretical architectures."
-            ),
-            "key_topics": [
-                f"{lesson_tag}: KISS Principle & Modular Object-Oriented Design (OOP/OOD)",
-                "Multi-Layer Smart Attendance: Rotating QR, GPS Geofencing & Local YOLO Headcount",
-                "Happy Case vs. Edge Case Engineering (Network/GPS Fallback & 15-Min Cooldown)",
-                "Iterative Verification & Live Classroom Demonstration Readiness",
-            ],
-            "core_takeaways": [
-                "Prefer simple, verifiable architectures that work reliably in a 10-minute live classroom demo.",
-                "Always pair automated detection (YOLO / GPS) with a human-in-the-loop lecturer override for edge cases.",
-                "Keep class responsibilities decoupled across Repository, Domain Service, and FastAPI Controller layers.",
-            ],
-            "action_items": [
-                "Students: Complete the Low-Level Class Diagram and map every class to automated pytest unit tests.",
-                "Students: Document both Happy Cases and Edge Cases in the Use Cases and SRS deliverables.",
-                "Lecturer: Publish the final submission deadline and run the live 10-minute classroom demo check.",
-            ],
-            "delivery_insights": {
-                "pacing": (
-                    "Well-paced progression from architectural problem statement to concrete design trade-offs; "
-                    "recommended pausing 30 seconds after diagram walkthroughs for student Q&A."
-                ),
-                "clarity": (
-                    "High conceptual clarity—real-world analogies (such as Dropbox simplicity) effectively "
-                    "anchored the KISS design requirement."
-                ),
-                "audio_quality": (
-                    f"Clear primary lecturer vocal track across the {size_kb:.1f} KB MP4 stream; "
-                    "repeat back-row student questions into the podium microphone for recording completeness."
-                ),
-                "overall_rating": "Excellent",
-            },
-        }
 
     def summarize_video(
         self,
@@ -184,16 +137,18 @@ class VideoSummarizer:
     ) -> dict[str, Any]:
         """
         Purpose:
-            Validate an uploaded `.mp4` lecture video, analyze it via `GeminiClient`,
-            and persist the structured summary in Firebase RTDB under `/video_summaries/{id}`.
+            Validate an uploaded `.mp4` lecture video, upload and analyze the full video
+            via `GeminiClient` (using the Gemini Files API), and persist the structured
+            summary in Firebase RTDB under `/video_summaries/{id}`.
         Inputs:
-            filename (str): Uploaded `.mp4` filename.
+            filename (str): Uploaded `.mp4` filename (supports Hebrew/Unicode filenames).
             video_bytes (bytes): Binary MP4 content.
             content_type (str | None): Multipart MIME type.
             lesson_tag (str): Associated lesson tag (e.g., `"Lesson 1"`).
             lecturer_notes (str): Optional context notes from the lecturer.
         Outputs:
             dict[str, Any]: Persisted structured lecture video summary record.
+            Raises `ValueError` for invalid files or `RuntimeError` if Gemini fails.
         """
         clean_filename = self.validate_mp4_upload(filename, video_bytes, content_type)
         clean_tag = (lesson_tag or "Lesson 1").strip() or "Lesson 1"
@@ -205,15 +160,10 @@ class VideoSummarizer:
             lecturer_notes=lecturer_notes,
             size_kb=size_kb,
         )
-        # Only forward inline media_bytes to Gemini if compact (< 18 MB) to respect inline payload limits
-        inline_media = video_bytes if len(video_bytes) <= 18 * 1024 * 1024 else None
         generated = self.gemini_client.generate_structured_json(
             prompt=prompt,
-            fallback_builder=lambda: self._build_fallback_summary(
-                clean_filename, clean_tag, lecturer_notes, size_kb
-            ),
-            media_bytes=inline_media,
-            mime_type="video/mp4" if inline_media else None,
+            media_bytes=video_bytes,
+            mime_type="video/mp4",
         )
 
         now_ts = int(time.time())
@@ -223,6 +173,16 @@ class VideoSummarizer:
             if isinstance(generated.get("delivery_insights"), dict)
             else {}
         )
+        exec_summary = str(
+            generated.get("executive_summary")
+            or generated.get("summary")
+            or ""
+        ).strip()
+        takeaways = list(
+            generated.get("core_takeaways")
+            or generated.get("takeaways")
+            or []
+        )
 
         record: dict[str, Any] = {
             "summary_id": summary_id,
@@ -230,9 +190,9 @@ class VideoSummarizer:
             "file_size_kb": size_kb,
             "lesson_tag": clean_tag,
             "lecturer_notes": (lecturer_notes or "").strip(),
-            "executive_summary": str(generated.get("executive_summary", "")),
+            "executive_summary": exec_summary,
             "key_topics": list(generated.get("key_topics", [])),
-            "core_takeaways": list(generated.get("core_takeaways", [])),
+            "core_takeaways": takeaways,
             "action_items": list(generated.get("action_items", [])),
             "delivery_insights": {
                 "pacing": str(delivery.get("pacing", "Balanced lecture pacing.")),
@@ -240,8 +200,8 @@ class VideoSummarizer:
                 "audio_quality": str(delivery.get("audio_quality", "Clear audio track.")),
                 "overall_rating": str(delivery.get("overall_rating", "Excellent")),
             },
-            "model_used": str(generated.get("model_used", "gemini-2.5-flash-lite")),
-            "provider": str(generated.get("provider", "structured_analyzer")),
+            "model_used": str(generated.get("model_used", "gemini-2.5-flash")),
+            "provider": str(generated.get("provider", "gemini_live")),
             "created_at": now_ts,
         }
         self.repository.set(f"/video_summaries/{summary_id}", record)
