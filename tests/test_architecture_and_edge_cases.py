@@ -16,6 +16,7 @@ Outputs:
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 import pytest
 
 from src.config import AppConfig
@@ -276,3 +277,36 @@ def test_domain_services_boundary_and_negative_edge_cases() -> None:
         hw.get_student_review_and_comparison(
             valid_hw["assignment_id"], "stu_never_submitted"
         )
+
+
+def test_all_required_markdown_deliverables_and_deployment_configs_exist() -> None:
+    """
+    Purpose:
+        Verify that all 8 required Markdown deliverables (`README.md` + `docs/01..07`)
+        and deployment configuration files (`render.yaml`, `Procfile`, `.env.example`,
+        `requirements.txt`) exist in the repository and are non-empty.
+    Inputs:
+        None.
+    Outputs:
+        None.
+    """
+    project_root = Path(__file__).resolve().parent.parent
+    required_files = [
+        "README.md",
+        ".env.example",
+        "requirements.txt",
+        "Procfile",
+        "render.yaml",
+        "docs/01_tools_report.md",
+        "docs/02_SoW.md",
+        "docs/03_SRS.md",
+        "docs/04_use_cases.md",
+        "docs/05_architecture_and_diagrams.md",
+        "docs/06_testing_strategy.md",
+        "docs/07_conclusion.md",
+    ]
+    for rel_path in required_files:
+        full_path = project_root / rel_path
+        assert full_path.is_file(), f"Missing required deliverable: {rel_path}"
+        assert full_path.stat().st_size > 50, f"Deliverable is unexpectedly empty: {rel_path}"
+
