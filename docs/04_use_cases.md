@@ -99,7 +99,7 @@ Every feature in the Web-Based AI Teaching Assistant is designed around explicit
 
 ### Happy Case (Main Success Scenario)
 1. Lecturer opens the **Video AI** tab, enters their AI Studio (`AIza...`) or Vertex AI Express (`AQ....`) Gemini API key, keeps **`gemini-3.5-flash-lite`** (or enters any custom Model ID), and either pastes a public YouTube URL OR selects an `.mp4` lecture video (`<= 20 MB`).
-2. A live processing indicator appears while `VideoSummarizer` and `GeminiClient` analyze the lecture directly (via `Part.from_uri` for YouTube, `Files.upload` for `AIza...` MP4, or inline `Part.from_bytes` for `AQ....` MP4), producing a structured card with **Executive Summary**, **Key Topics**, **Core Takeaways**, **Action Items**, and **Lecturer Delivery Insights** (`Pacing`, `Clarity`, `Audio Quality`, `Overall Rating`).
+2. A live processing indicator appears while `VideoSummarizer` and `GeminiClient` analyze the lecture directly (via `Part.from_uri` for YouTube, `Files.upload` using OS `tempfile.gettempdir()` for `AIza...` MP4, or inline `Part.from_bytes` for `AQ....` MP4), producing a structured card with **Executive Summary**, **Key Topics**, **Core Takeaways**, **Action Items**, **Lecturer Delivery Insights** (`Pacing`, `Clarity`, `Audio Quality`, `Overall Rating`), and a **Delete** button (`DELETE /api/video/summaries/{summary_id}`).
 
 ### Edge Cases & Exception Flows
 * **EC-06.1 (Unsupported Format, > 20 MB MP4, or Non-YouTube URL):** Uploading non-MP4 files (`.avi`, `.docx`), `.mp4` clips larger than `20 MB`, or non-YouTube URLs is rejected cleanly (`400 Bad Request`) with a descriptive message.

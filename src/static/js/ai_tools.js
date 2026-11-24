@@ -147,6 +147,23 @@ export function renderVideoSummaryTab(container, ctx) {
     const renderSummaryCard = (s) => {
         const del = s.delivery_insights || {};
         const sizeLabel = s.source_type === 'youtube' ? 'YouTube Video' : `${s.file_size_kb} KB`;
+        const deleteBtn = button('Delete', {
+            cls: 'sm ghost danger',
+            iconName: 'trash',
+            'aria-label': `Delete summary ${s.filename || s.summary_id}`,
+        });
+        deleteBtn.addEventListener('click', () => {
+            if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+                const ok = window.confirm(`Delete summary for "${s.filename || s.lesson_tag || 'this lecture'}"?`);
+                if (!ok) return;
+            }
+            withLoading(deleteBtn, async () => {
+                await api.delete(`/api/video/summaries/${encodeURIComponent(s.summary_id)}`);
+                toast('Lecture video summary deleted.', 'info');
+                await loadSummaries();
+            });
+        });
+
         return el('div', { class: 'card stack' }, [
             el('div', { class: 'row' }, [
                 el('span', { class: 'chip ok' }, s.lesson_tag || 'Lesson 1'),
@@ -154,6 +171,7 @@ export function renderVideoSummaryTab(container, ctx) {
                 el('span', { class: 'faint' }, `${sizeLabel} · Model: ${s.model_used} · ${formatTime(s.created_at)}`),
                 el('span', { class: 'spacer' }),
                 el('span', { class: 'chip ok' }, `Delivery: ${del.overall_rating || 'Excellent'}`),
+                deleteBtn,
             ]),
             el('div', { class: 'banner info' }, [
                 el('span', { html: icon('sparkles') }),

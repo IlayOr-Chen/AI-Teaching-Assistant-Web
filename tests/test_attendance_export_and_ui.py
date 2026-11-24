@@ -201,13 +201,23 @@ def test_attendance_management_and_yolo_ui_wiring() -> None:
         "label: 'Roster'",
         "Export CSV (.csv)",
         "Export Excel (.xlsx)",
-        "Test on Classroom Photo (p3.jpeg)",
+        "Upload classroom photo",
+        "Reset YOLO",
+        "Lesson Scope (Controls Both YOLO Headcount & Roster Below)",
         "YOLO Detected Count",
         "Self-Registered Count",
         "Mark Present",
         "Mark Absent",
     ):
         assert expected in js_res.text, f"Missing '{expected}' in lecturer.js"
+    assert "p3.jpeg" not in js_res.text
+    assert "Test on Classroom Photo" not in js_res.text
+
+    stu_res = client.get("/static/js/student.js")
+    assert stu_res.status_code == 200
+    assert "My Attendance History" in stu_res.text
+    assert "inside the classroom GPS geofence" in stu_res.text
+    assert "on the classroom network" not in stu_res.text
 
     css_res = client.get("/static/css/styles.css")
     assert css_res.status_code == 200

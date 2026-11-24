@@ -99,6 +99,9 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
             "label: 'Homework'",
             "Select Existing Lesson or Open a New Lesson",
             "Switch / Open Another Lesson",
+            "Lesson Scope (Controls Both YOLO Headcount & Roster Below)",
+            "Upload classroom photo",
+            "Reset YOLO",
             "Sync from Course Excel",
             "Reset 15-Min Device Cooldowns",
             "Use My Current Location",
@@ -107,7 +110,15 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
             "Copy Link",
             "Scan to check in — protected by GPS Geofencing & 15-min device cooldown.",
         ],
-        "/static/js/student.js": ["renderStudentCheckin", "renderStudentLogin", "renderStudentPortal", "combo-email"],
+        "/static/js/student.js": [
+            "renderStudentCheckin",
+            "renderStudentLogin",
+            "renderStudentPortal",
+            "combo-email",
+            "My Attendance History",
+            "/api/attendance/my-history",
+            "inside the classroom GPS geofence",
+        ],
         "/static/js/polls_comments.js": ["Selected — click again to unvote"],
         "/static/js/ai_tools.js": [
             "gemini-3.5-flash-lite",
@@ -120,10 +131,11 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
             "X-Gemini-Model",
             "Your Gemini API Key & Model (BYOK)",
             "/api/video/summarize-youtube",
+            "/api/video/summaries/",
         ],
         "/static/js/ui.js": ["toast", "createTabs", "pageShell", "withLoading"],
-        "/static/js/api.js": ["ApiError", "export const api", "extraHeaders"],
-        "/static/js/icons.js": ["export function icon"],
+        "/static/js/api.js": ["ApiError", "export const api", "extraHeaders", "Gateway/Server error", "text/html", "delete:"],
+        "/static/js/icons.js": ["export function icon", "trash:", "refresh:"],
     }
     for path, expected_tokens in js_files.items():
         res = ui_client.get(path)
@@ -136,9 +148,12 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
     ai_js = ui_client.get("/static/js/ai_tools.js").text
     assert "__custom__" not in ai_js
     assert "modelSelect" not in ai_js
-    # Confirm public lecturer self-registration UI and email placeholder leak were removed from lecturer.js
+    # Confirm public lecturer self-registration UI, email placeholder leak, and demo media assets were removed
     lec_js = ui_client.get("/static/js/lecturer.js").text
     assert "Create lecturer account" not in lec_js
     assert "/api/auth/lecturer/register" not in lec_js
     assert "adminL@gmail.com" not in lec_js
     assert "QR rotates every" not in lec_js
+    assert "p3.jpeg" not in lec_js
+    stu_js = ui_client.get("/static/js/student.js").text
+    assert "on the classroom network" not in stu_js

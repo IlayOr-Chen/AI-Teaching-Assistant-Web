@@ -21,12 +21,13 @@ export class ApiError extends Error {
 }
 
 /**
- * Purpose: Extract a readable message from a FastAPI JSON or text error payload
- *          (`detail` may be a string, list of validation errors, or structured object).
- * Inputs:  payload (any) parsed JSON body; rawText (string) raw response text; fallback (string).
+ * Purpose: Extract a readable message from a FastAPI JSON or text error payload,
+ *          guarding against raw Cloudflare / proxy HTML error pages.
+ * Inputs:  payload (any) parsed JSON body; rawText (string) raw response text;
+ *          fallback (string); statusCode (number); contentType (string).
  * Outputs: string message.
  */
-function extractMessage(payload, rawText, fallback) {
+function extractMessage(payload, rawText, fallback, statusCode = 0, contentType = '') {
     if (payload && payload.detail !== undefined) {
         if (typeof payload.detail === 'string' && payload.detail.trim()) return payload.detail;
         if (Array.isArray(payload.detail) && payload.detail.length) {
@@ -39,6 +40,14 @@ function extractMessage(payload, rawText, fallback) {
     if (payload && typeof payload.message === 'string' && payload.message.trim()) return payload.message;
     if (payload && typeof payload.error === 'string' && payload.error.trim()) return payload.error;
     const cleanRaw = (rawText || '').trim();
+    const looksLikeHtml = (
+        String(contentType || '').toLowerCase().includes('text/html')
+        || /^(?:<!doctype\s+html|<html|<!--\[if\s+lt\s+IE)/i.test(cleanRaw)
+    );
+    if (looksLikeHtml) {
+        const statusHint = statusCode ? `${statusCode}` : '502/524';
+        return `Gateway/Server error (${statusHint}): the backend restarted or timed out while processing the request. Please check the server terminal and try again.`;
+    }
     if (cleanRaw) return cleanRaw.slice(0, 260);
     return fallback;
 }
@@ -49,10 +58,16 @@ function extractMessage(payload, rawText, fallback) {
  * Outputs: Promise resolving to parsed JSON (or null for empty bodies); rejects with ApiError.
  */
 async function request(method, url, body, extraHeaders = {}) {
+    const cleanHeaders = {};
+    for (const [k, v] of Object.entries(extraHeaders || {})) {
+        if (v !== undefined && v !== null) {
+            cleanHeaders[k] = String(v).replace(/[^\x20-\x7E]/g, '').trim();
+        }
+    }
     const options = {
         method,
         credentials: 'same-origin',
-        headers: { ...extraHeaders },
+        headers: cleanHeaders,
     };
     if (body instanceof FormData) {
         options.body = body; // browser sets the multipart boundary itself
@@ -65,21 +80,29 @@ async function request(method, url, body, extraHeaders = {}) {
     try {
         response = await fetch(url, options);
     } catch (networkError) {
-        throw new ApiError('Cannot reach the server. Check your connection and try again.', 0);
+        const detail = networkError && networkError.message ? ` (${networkError.message})` : '';
+        throw new ApiError(`Cannot reach the server${detail}. Check your connection and try again.`, 0);
     }
 
+    const contentType = (response.headers && typeof response.headers.get === 'function'
+        ? response.headers.get('content-type')
+        : '') || '';
     let rawText = '';
     let payload = null;
     try {
         rawText = await response.text();
-        if (rawText) payload = JSON.parse(rawText);
+        const isHtml = (
+            contentType.toLowerCase().includes('text/html')
+            || /^(?:<!doctype\s+html|<html|<!--\[if\s+lt\s+IE)/i.test(rawText.trim())
+        );
+        if (rawText && !isHtml) payload = JSON.parse(rawText);
     } catch (_) {
         payload = null; // empty or non-JSON body; keep rawText for error reporting
     }
 
     if (!response.ok) {
         throw new ApiError(
-            extractMessage(payload, rawText, `Request failed (${response.status}).`),
+            extractMessage(payload, rawText, `Request failed (${response.status}).`, response.status, contentType),
             response.status,
         );
     }
@@ -92,5 +115,6 @@ export const api = {
     post: (url, body, headers = {}) => request('POST', url, body, headers),
     put: (url, body, headers = {}) => request('PUT', url, body, headers),
     patch: (url, body, headers = {}) => request('PATCH', url, body, headers),
+    delete: (url, headers = {}) => request('DELETE', url, undefined, headers),
     upload: (url, formData, headers = {}) => request('POST', url, formData, headers),
 };

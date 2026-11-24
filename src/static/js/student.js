@@ -340,17 +340,90 @@ function renderStudentHomeTab(container, ctx) {
         'Pick your name and tap “Check me in”.',
     ].map((text, i) => el('li', { class: 'row' }, [el('span', { class: 'chip ok' }, String(i + 1)), el('span', {}, text)]));
 
-    mount(container, el('div', { class: 'grid grid-2' }, [
-        el('div', { class: 'card stack' }, [
-            el('div', { class: 'card-title' }, [el('span', { html: icon('qr') }), el('h2', {}, 'Check in to class')]),
-            el('ol', { class: 'stack', style: 'list-style:none' }, steps),
-            el('div', { class: 'banner info' }, [el('span', { html: icon('shield') }), el('span', {}, 'One check-in per device every 15 minutes, and you must be on the classroom network.')]),
+    const historySummaryChip = el('span', { class: 'chip' }, 'Loading history…');
+    const historyBar = el('i', { style: 'width:0%' });
+    const historyListHost = el('div', { class: 'stack' }, [
+        el('div', { class: 'empty' }, 'Loading your lesson attendance history…'),
+    ]);
+
+    const loadHistory = async () => {
+        try {
+            const history = await api.get('/api/attendance/my-history');
+            const total = history.total_lessons || 0;
+            const attended = history.attended_count || 0;
+            const rate = history.attendance_rate ?? 0;
+            historyBar.style.width = `${rate}%`;
+            historySummaryChip.className = `chip ${total === 0 ? '' : (rate >= 50 ? 'ok' : 'warn')}`.trim();
+            historySummaryChip.textContent = total === 0
+                ? 'No lessons recorded yet'
+                : `Attended ${attended} / ${total} lesson${total === 1 ? '' : 's'} · ${rate}%`;
+
+            const lessons = history.lessons || [];
+            if (!lessons.length) {
+                mount(historyListHost, el('div', { class: 'empty' },
+                    'No attendance lessons have been opened yet. Your Present / Absent record per lesson will appear here.'));
+                return;
+            }
+
+            mount(historyListHost, el('div', { class: 'history-list' }, lessons.map((item) => {
+                const isPresent = item.status === 'present';
+                const subtitleParts = [];
+                if (isPresent) {
+                    subtitleParts.push(item.method === 'manual' ? 'Marked by lecturer' : 'QR check-in');
+                    if (item.checked_in_at) subtitleParts.push(formatTime(item.checked_in_at));
+                } else {
+                    subtitleParts.push(item.active ? 'Session LIVE now' : 'No check-in recorded');
+                }
+                return el('div', { class: 'history-item' }, [
+                    el('div', { class: 'history-meta' }, [
+                        el('strong', { dir: 'auto' }, item.lesson_title || item.lesson_id),
+                        el('span', { class: 'faint' }, subtitleParts.join(' · ')),
+                    ]),
+                    el('span', { class: `chip ${isPresent ? 'ok' : 'danger'}` }, [
+                        el('span', { class: 'dot' }),
+                        isPresent ? 'Present' : 'Absent',
+                    ]),
+                ]);
+            })));
+        } catch (err) {
+            historySummaryChip.className = 'chip danger';
+            historySummaryChip.textContent = 'Unavailable';
+            mount(historyListHost, el('div', { class: 'empty' }, err.message || 'Could not load attendance history.'));
+        }
+    };
+
+    mount(container, el('div', { class: 'stack' }, [
+        el('div', { class: 'grid grid-2' }, [
+            el('div', { class: 'card stack' }, [
+                el('div', { class: 'card-title' }, [el('span', { html: icon('qr') }), el('h2', {}, 'Check in to class')]),
+                el('ol', { class: 'stack', style: 'list-style:none' }, steps),
+                el('div', { class: 'banner info' }, [el('span', { html: icon('shield') }), el('span', {}, 'One check-in per device every 15 minutes, and you must be inside the classroom GPS geofence.')]),
+            ]),
+            el('div', { class: 'card stack' }, [
+                el('div', { class: 'card-title' }, [el('span', { html: icon('user') }), el('h2', {}, 'Your details')]),
+                el('div', { class: 'stat' }, [
+                    el('div', { class: 'stat-label' }, 'Name'),
+                    el('div', { class: 'stat-value small', style: 'text-align:left' }, [
+                        el('span', { dir: 'auto', style: 'unicode-bidi:plaintext' }, ctx.user.full_name || ''),
+                    ]),
+                ]),
+                el('div', { class: 'stat' }, [el('div', { class: 'stat-label' }, 'Email'), el('div', { class: 'stat-value small', style: 'text-align:left' }, ctx.user.email)]),
+                el('div', { class: 'stat' }, [el('div', { class: 'stat-label' }, 'Group'), el('div', { class: 'stat-value small', style: 'text-align:left' }, ctx.user.group || 'Not assigned')]),
+            ]),
         ]),
         el('div', { class: 'card stack' }, [
-            el('div', { class: 'card-title' }, [el('span', { html: icon('user') }), el('h2', {}, 'Your details')]),
-            el('div', { class: 'stat' }, [el('div', { class: 'stat-label' }, 'Name'), el('div', { class: 'stat-value small', dir: 'auto' }, ctx.user.full_name)]),
-            el('div', { class: 'stat' }, [el('div', { class: 'stat-label' }, 'Email'), el('div', { class: 'stat-value small' }, ctx.user.email)]),
-            el('div', { class: 'stat' }, [el('div', { class: 'stat-label' }, 'Group'), el('div', { class: 'stat-value small' }, ctx.user.group || 'Not assigned')]),
+            el('div', { class: 'row' }, [
+                el('div', { class: 'card-title', style: 'margin-bottom:0' }, [
+                    el('span', { html: icon('clock') }),
+                    el('h2', {}, 'My Attendance History'),
+                ]),
+                el('span', { class: 'spacer' }),
+                historySummaryChip,
+            ]),
+            el('div', { class: 'progress' }, historyBar),
+            historyListHost,
         ]),
     ]));
+
+    loadHistory();
 }

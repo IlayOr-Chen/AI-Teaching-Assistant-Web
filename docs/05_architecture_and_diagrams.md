@@ -201,6 +201,7 @@ classDiagram
         -_format_timestamp_iso(unix_ts)$ str
         +export_attendance_csv(lesson_id) bytes
         +export_attendance_xlsx(lesson_id) bytes
+        +get_student_attendance_history(student_id) dict
     }
 
     class PhotoHeadCounter {
@@ -214,6 +215,7 @@ classDiagram
         -_annotate_image(pil_image, detections, output_image_path)$ str
         -_run_yolo_person_detection(pil_image, conf_threshold) list~dict~
         +analyze_classroom_photo(image_source, lesson_id, registered_count, conf_threshold, output_image_path) dict
+        +reset_headcount(lesson_id) dict
     }
 
     class PollService {
@@ -255,6 +257,7 @@ classDiagram
         -_build_prompt(filename, lesson_tag, lecturer_notes, size_kb)$ str
         +summarize_video(filename, video_bytes, content_type, lesson_tag, lecturer_notes, youtube_url) dict
         +list_summaries() list~dict~
+        +delete_summary(summary_id) dict
     }
 
     class HomeworkReviewer {
