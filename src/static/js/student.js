@@ -8,6 +8,7 @@
 
 import { api, ApiError } from './api.js';
 import { icon } from './icons.js';
+import { renderPollsTab, renderCommentsTab } from './polls_comments.js';
 import {
     el, mount, toast, button, withLoading, createTabs, formatClock, formatTime, pageShell,
 } from './ui.js';
@@ -308,6 +309,8 @@ export function renderStudentPortal(root, ctx) {
 function buildStudentTabs(ctx) {
     return [
         { id: 'checkin', label: 'Check-in', icon: 'qr', render: (c) => renderStudentHomeTab(c, ctx) },
+        { id: 'polls', label: 'Live Polls', icon: 'poll', render: (c) => renderPollsTab(c, { ...ctx, role: 'student' }) },
+        { id: 'comments', label: 'Comments & Suggestions', icon: 'message', render: (c) => renderCommentsTab(c, { ...ctx, role: 'student' }) },
     ];
 }
 

@@ -41,7 +41,9 @@ from src.services.auth_service import (
     STUDENT_COOKIE_NAME,
     AuthService,
 )
+from src.services.comment_service import CommentService
 from src.services.photo_head_counter import PhotoHeadCounter
+from src.services.poll_service import PollService
 from src.services.roster_importer import RosterImporter
 from src.utils.ip_resolver import ClientIPResolver
 
@@ -202,6 +204,82 @@ class ManualAttendanceRequest(BaseModel):
     status: str
 
 
+class CreatePollRequest(BaseModel):
+    """
+    Purpose:
+        Pydantic schema for creating an on-the-spot multiple-choice classroom poll.
+    Inputs:
+        question (str), options (list[str]), lesson_tag (str).
+    Outputs:
+        Validated `CreatePollRequest` instance.
+    """
+
+    question: str
+    options: list[str]
+    lesson_tag: str = "General"
+
+
+class PollStatusToggleRequest(BaseModel):
+    """
+    Purpose:
+        Pydantic schema for opening or closing voting on a poll.
+    Inputs:
+        active (bool): True to accept votes, False to close voting.
+    Outputs:
+        Validated `PollStatusToggleRequest` instance.
+    """
+
+    active: bool
+
+
+class SubmitPollVoteRequest(BaseModel):
+    """
+    Purpose:
+        Pydantic schema for submitting a student vote on an active poll.
+    Inputs:
+        option_index (int): Zero-based index of the selected option.
+        voter_id (str | None): Optional fallback voter ID if unauthenticated.
+    Outputs:
+        Validated `SubmitPollVoteRequest` instance.
+    """
+
+    option_index: int
+    voter_id: str | None = None
+
+
+class CreateCommentRequest(BaseModel):
+    """
+    Purpose:
+        Pydantic schema for posting a public or private (lecturer-only) comment.
+    Inputs:
+        text (str), visibility (str), is_anonymous (bool), scope_tag (str),
+        author_name (str | None).
+    Outputs:
+        Validated `CreateCommentRequest` instance.
+    """
+
+    text: str
+    visibility: str = "public"
+    is_anonymous: bool = False
+    scope_tag: str = "General"
+    author_name: str | None = None
+
+
+class CreateCommentReplyRequest(BaseModel):
+    """
+    Purpose:
+        Pydantic schema for posting a threaded reply on an existing comment.
+    Inputs:
+        text (str), is_anonymous (bool), author_name (str | None).
+    Outputs:
+        Validated `CreateCommentReplyRequest` instance.
+    """
+
+    text: str
+    is_anonymous: bool = False
+    author_name: str | None = None
+
+
 def create_app(
     config: AppConfig | None = None,
     repository: FirebaseRepository | None = None,
@@ -232,6 +310,8 @@ def create_app(
     photo_head_counter = PhotoHeadCounter(
         repository=resolved_repo, config=resolved_config
     )
+    poll_service = PollService(repository=resolved_repo)
+    comment_service = CommentService(repository=resolved_repo)
 
     fastapi_app = FastAPI(
         title="Web-Based AI Teaching Assistant",
@@ -249,6 +329,8 @@ def create_app(
     fastapi_app.state.roster_importer = roster_importer
     fastapi_app.state.attendance_manager = attendance_manager
     fastapi_app.state.photo_head_counter = photo_head_counter
+    fastapi_app.state.poll_service = poll_service
+    fastapi_app.state.comment_service = comment_service
 
     if STATIC_DIR.is_dir():
         fastapi_app.mount(
@@ -954,6 +1036,262 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             ) from exc
+
+    def _resolve_caller_identity(request: Request) -> dict[str, str]:
+        """
+        Purpose:
+            Inspect the caller's JWT cookie/header and return their `id`, `name`,
+            and `role` (`"lecturer"` or `"student"`), falling back to a signed
+            device cookie or guest student identity when unauthenticated.
+        Inputs:
+            request (Request): Incoming FastAPI request.
+        Outputs:
+            dict[str, str]: Dictionary with keys `"id"`, `"name"`, and `"role"`.
+        """
+        svc: AuthService = request.app.state.auth_service
+        token = svc.extract_token_from_request(request)
+        if token:
+            try:
+                claims = svc.verify_jwt_token(token)
+                return {
+                    "id": str(claims.get("sub", "guest")),
+                    "name": str(claims.get("full_name", "Student")),
+                    "role": str(claims.get("role", "student")),
+                }
+            except Exception:
+                pass
+
+        mgr: AttendanceManager = request.app.state.attendance_manager
+        dev_id = mgr.verify_signed_device_cookie(
+            request.cookies.get(DEVICE_COOKIE_NAME)
+        )
+        return {
+            "id": dev_id or f"ip_{ClientIPResolver.resolve(request)}",
+            "name": "Student",
+            "role": "student",
+        }
+
+    @fastapi_app.post("/api/polls", response_class=JSONResponse)
+    async def create_poll_endpoint(
+        payload: CreatePollRequest, request: Request
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Lecturer-protected endpoint to create and launch an on-the-spot
+            multiple-choice poll in Firebase RTDB (`/polls`).
+        Inputs:
+            payload (CreatePollRequest): Poll question, answer options, and lesson tag.
+            request (Request): Incoming FastAPI request.
+        Outputs:
+            dict[str, Any]: Created enriched poll dictionary.
+        """
+        svc: AuthService = request.app.state.auth_service
+        claims = svc.require_lecturer_claims(request)
+
+        polls: PollService = request.app.state.poll_service
+        try:
+            return polls.create_poll(
+                question=payload.question,
+                options=payload.options,
+                lesson_tag=payload.lesson_tag,
+                created_by=str(claims.get("full_name", "Lecturer")),
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+    @fastapi_app.get("/api/polls", response_class=JSONResponse)
+    async def list_polls_endpoint(
+        request: Request,
+        active_only: bool = Query(default=False),
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            List classroom polls from `/polls` with live vote counts, percentages,
+            and the caller's selected `viewer_vote`.
+        Inputs:
+            request (Request): Incoming FastAPI request.
+            active_only (bool): When True, returns only active open polls.
+        Outputs:
+            dict[str, Any]: Dictionary containing `count` and `polls`.
+        """
+        caller = _resolve_caller_identity(request)
+        polls: PollService = request.app.state.poll_service
+        items = polls.list_polls(active_only=active_only, viewer_id=caller["id"])
+        return {"count": len(items), "polls": items}
+
+    @fastapi_app.patch("/api/polls/{poll_id}/status", response_class=JSONResponse)
+    async def toggle_poll_status_endpoint(
+        poll_id: str, payload: PollStatusToggleRequest, request: Request
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Lecturer-protected endpoint to open (`active=True`) or close (`active=False`)
+            voting on a poll.
+        Inputs:
+            poll_id (str): Target poll ID.
+            payload (PollStatusToggleRequest): Desired `active` boolean.
+            request (Request): Incoming FastAPI request.
+        Outputs:
+            dict[str, Any]: Updated enriched poll dictionary.
+        """
+        svc: AuthService = request.app.state.auth_service
+        svc.require_lecturer_claims(request)
+
+        polls: PollService = request.app.state.poll_service
+        try:
+            return polls.set_poll_active(poll_id=poll_id, active=payload.active)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+            ) from exc
+
+    @fastapi_app.post("/api/polls/{poll_id}/vote", response_class=JSONResponse)
+    async def submit_poll_vote_endpoint(
+        poll_id: str, payload: SubmitPollVoteRequest, request: Request
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Submit a student vote on an active poll, enforcing single-vote-per-poll.
+        Inputs:
+            poll_id (str): Target poll ID.
+            payload (SubmitPollVoteRequest): Chosen `option_index` and optional fallback `voter_id`.
+            request (Request): Incoming FastAPI request.
+        Outputs:
+            dict[str, Any]: Updated enriched poll dictionary with live percentage breakdown.
+        """
+        caller = _resolve_caller_identity(request)
+        voter_id = (
+            caller["id"]
+            if caller["id"] and not caller["id"].startswith("ip_")
+            else (payload.voter_id or caller["id"])
+        )
+        polls: PollService = request.app.state.poll_service
+        try:
+            return polls.submit_vote(
+                poll_id=poll_id,
+                voter_id=voter_id,
+                option_index=payload.option_index,
+            )
+        except PermissionError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)
+            ) from exc
+        except ValueError as exc:
+            status_code = (
+                status.HTTP_404_NOT_FOUND
+                if "not found" in str(exc).lower()
+                else status.HTTP_400_BAD_REQUEST
+            )
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    @fastapi_app.post("/api/comments", response_class=JSONResponse)
+    async def create_comment_endpoint(
+        payload: CreateCommentRequest, request: Request
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Create a classroom comment or suggestion with configurable visibility
+            (`public` vs. `private` Lecturer-only), identity (`With Name` vs. `Anonymous`),
+            and scope tag (`Lesson 1..N` vs. `General`).
+        Inputs:
+            payload (CreateCommentRequest): Comment body and metadata.
+            request (Request): Incoming FastAPI request.
+        Outputs:
+            dict[str, Any]: Created sanitized comment dictionary.
+        """
+        caller = _resolve_caller_identity(request)
+        author_name = (
+            (payload.author_name or "").strip()
+            if caller["name"] == "Student" and payload.author_name
+            else caller["name"]
+        )
+        comments: CommentService = request.app.state.comment_service
+        try:
+            return comments.create_comment(
+                text=payload.text,
+                author_id=caller["id"],
+                author_name=author_name or "Student",
+                author_role=caller["role"],
+                visibility=payload.visibility,
+                is_anonymous=payload.is_anonymous,
+                scope_tag=payload.scope_tag,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+    @fastapi_app.get("/api/comments", response_class=JSONResponse)
+    async def list_comments_endpoint(
+        request: Request,
+        scope_tag: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            List comments visible to the caller (Lecturers see all public & private
+            comments; Students see public comments + their own private comments),
+            optionally filtered by `scope_tag`.
+        Inputs:
+            request (Request): Incoming FastAPI request.
+            scope_tag (str | None): Optional scope filter (`"General"`, `"Lesson 1"`, etc.).
+        Outputs:
+            dict[str, Any]: Dictionary containing `count` and `comments`.
+        """
+        caller = _resolve_caller_identity(request)
+        comments: CommentService = request.app.state.comment_service
+        items = comments.list_comments(
+            viewer_role=caller["role"],
+            viewer_id=caller["id"],
+            scope_tag=scope_tag,
+        )
+        return {"count": len(items), "comments": items}
+
+    @fastapi_app.post(
+        "/api/comments/{comment_id}/replies", response_class=JSONResponse
+    )
+    async def create_comment_reply_endpoint(
+        comment_id: str, payload: CreateCommentReplyRequest, request: Request
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Append a threaded reply to an existing comment, enforcing privacy rules
+            so other students cannot reply to a `private` (Lecturer-only) comment.
+        Inputs:
+            comment_id (str): Parent comment ID.
+            payload (CreateCommentReplyRequest): Reply text and anonymity flag.
+            request (Request): Incoming FastAPI request.
+        Outputs:
+            dict[str, Any]: Updated parent comment thread dictionary.
+        """
+        caller = _resolve_caller_identity(request)
+        author_name = (
+            (payload.author_name or "").strip()
+            if caller["name"] == "Student" and payload.author_name
+            else caller["name"]
+        )
+        comments: CommentService = request.app.state.comment_service
+        try:
+            return comments.add_reply(
+                comment_id=comment_id,
+                text=payload.text,
+                author_id=caller["id"],
+                author_name=author_name or "Student",
+                author_role=caller["role"],
+                is_anonymous=payload.is_anonymous,
+            )
+        except PermissionError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)
+            ) from exc
+        except ValueError as exc:
+            status_code = (
+                status.HTTP_404_NOT_FOUND
+                if "not found" in str(exc).lower()
+                else status.HTTP_400_BAD_REQUEST
+            )
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
     return fastapi_app
 

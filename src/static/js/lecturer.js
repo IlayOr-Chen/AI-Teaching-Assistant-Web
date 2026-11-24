@@ -7,6 +7,7 @@
 
 import { api } from './api.js';
 import { icon } from './icons.js';
+import { renderPollsTab, renderCommentsTab } from './polls_comments.js';
 import {
     el, mount, toast, button, withLoading, createTabs, copyText, formatTime, pageShell,
 } from './ui.js';
@@ -117,6 +118,8 @@ function buildLecturerTabs(ctx) {
         { id: 'overview', label: 'Overview', icon: 'grid', render: (c) => renderOverviewTab(c, ctx) },
         { id: 'attendance', label: 'Live attendance', icon: 'qr', render: (c) => renderLiveAttendanceTab(c, ctx) },
         { id: 'roster', label: 'Roster & YOLO Headcount', icon: 'table', render: (c) => renderRosterAndHeadcountTab(c, ctx) },
+        { id: 'polls', label: 'Live Polls', icon: 'poll', render: (c) => renderPollsTab(c, { ...ctx, role: 'lecturer' }) },
+        { id: 'comments', label: 'Comments & Suggestions', icon: 'message', render: (c) => renderCommentsTab(c, { ...ctx, role: 'lecturer' }) },
     ];
 }
 
