@@ -107,18 +107,29 @@ class GeminiClient:
         """
         Purpose:
             Instantiate a `google.genai.Client` supporting both Vertex AI Express API keys
-            (prefix `AQ.`) and Google AI Studio API keys (prefix `AIza` / standard keys).
+            (prefix `AQ.`) and Google AI Studio API keys (prefix `AIza` / standard keys),
+            configured with an explicit 75s HTTP timeout under Cloudflare's 100s gateway limit.
         Inputs:
             api_key (str): Valid Gemini or Vertex AI Express API key.
         Outputs:
             Any: Configured `google.genai.Client` instance.
         """
         from google import genai
+        from google.genai import types
 
         clean_key = (api_key or "").strip()
-        if clean_key.startswith("AQ."):
-            return genai.Client(vertexai=True, api_key=clean_key)
-        return genai.Client(api_key=clean_key)
+        http_opts = types.HttpOptions(timeout=75_000)
+        try:
+            if clean_key.startswith("AQ."):
+                return genai.Client(
+                    vertexai=True, api_key=clean_key, http_options=http_opts
+                )
+            return genai.Client(api_key=clean_key, http_options=http_opts)
+        except TypeError:
+            # Minimal test doubles in unit tests may omit http_options
+            if clean_key.startswith("AQ."):
+                return genai.Client(vertexai=True, api_key=clean_key)
+            return genai.Client(api_key=clean_key)
 
     def resolve_credentials(
         self,
@@ -370,10 +381,12 @@ class GeminiClient:
                     temp_path: str | None = None
                     uploaded_file: Any = None
                     try:
-                        # Use an ASCII-safe temporary filename so Hebrew/Unicode filenames
-                        # never cause filesystem or HTTP header errors during Files API upload.
+                        # Write strictly inside OS temp dir (never watched workspace dirs) with ASCII-safe name
                         with tempfile.NamedTemporaryFile(
-                            prefix="gemini_lecture_", suffix=".mp4", delete=False
+                            prefix="gemini_lecture_",
+                            suffix=".mp4",
+                            dir=tempfile.gettempdir(),
+                            delete=False,
                         ) as tmp_file:
                             tmp_file.write(media_bytes)
                             temp_path = tmp_file.name
@@ -394,11 +407,11 @@ class GeminiClient:
                             )
                             if "PROCESSING" not in state_name:
                                 break
-                            if time.time() - poll_start > 300:
+                            if time.time() - poll_start > 65:
                                 raise RuntimeError(
-                                    "Timed out waiting for Gemini Files API to finish processing the MP4 video."
+                                    "Timed out waiting for Gemini Files API to finish processing the MP4 video (please use a shorter clip or a public YouTube URL)."
                                 )
-                            time.sleep(2.5)
+                            time.sleep(2.0)
                             uploaded_file = client.files.get(name=uploaded_file.name)
 
                         final_state_obj = getattr(uploaded_file, "state", None)

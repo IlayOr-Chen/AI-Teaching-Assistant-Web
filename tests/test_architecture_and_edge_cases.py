@@ -107,6 +107,7 @@ EXPECTED_CLASS_METHODS: dict[type, set[str]] = {
         "_format_timestamp_iso",
         "export_attendance_csv",
         "export_attendance_xlsx",
+        "get_student_attendance_history",
     },
     PhotoHeadCounter: {
         "_get_model",
@@ -115,6 +116,7 @@ EXPECTED_CLASS_METHODS: dict[type, set[str]] = {
         "_annotate_image",
         "_run_yolo_person_detection",
         "analyze_classroom_photo",
+        "reset_headcount",
     },
     PollService: {
         "_format_poll",
@@ -145,6 +147,7 @@ EXPECTED_CLASS_METHODS: dict[type, set[str]] = {
         "_build_prompt",
         "summarize_video",
         "list_summaries",
+        "delete_summary",
     },
     HomeworkReviewer: {
         "is_review_released",

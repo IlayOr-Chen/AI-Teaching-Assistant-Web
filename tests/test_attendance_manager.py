@@ -775,3 +775,67 @@ def test_multi_lesson_switching_and_opening_new_lesson(
     assert manager.get_session("lesson_2")["active"] is False
     report_l1 = manager.get_lesson_attendance_report("lesson_1")
     assert report_l1["present_count"] == 1
+
+
+def test_student_attendance_history_unit_and_http_endpoint(
+    attendance_env: tuple[AppConfig, FirebaseRepository, AttendanceManager]
+) -> None:
+    """
+    Purpose:
+        Verify `AttendanceManager.get_student_attendance_history` and the student-accessible
+        `GET /api/attendance/my-history` endpoint return accurate Present/Absent status
+        and overall attendance rate across all lessons.
+    Inputs:
+        attendance_env: Isolated attendance test fixture.
+    Outputs:
+        None.
+    """
+    cfg, repo, manager = attendance_env
+    # Start 3 lessons; Alice attends lesson_1 (QR) and lesson_3 (manual), misses lesson_2
+    manager.start_session(
+        "lesson_1",
+        "Lesson 1: Intro",
+        classroom_lat=CLASSROOM_LAT,
+        classroom_lng=CLASSROOM_LNG,
+    )
+    qr1 = manager.generate_rotating_qr_token("lesson_1", now_ts=1_700_000_010)
+    manager.submit_qr_checkin(
+        lesson_id="lesson_1",
+        student_id="stu_alice",
+        qr_token=qr1["qr_token"],
+        student_lat=INSIDE_RADIUS_LAT,
+        student_lng=INSIDE_RADIUS_LNG,
+        now_ts=1_700_000_020,
+    )
+    manager.start_session("lesson_2", "Lesson 2: Architecture")
+    manager.start_session("lesson_3", "Lesson 3: Testing")
+    manager.set_manual_attendance("lesson_3", "stu_alice", "present")
+
+    history = manager.get_student_attendance_history("stu_alice")
+    assert history["student_id"] == "stu_alice"
+    assert history["attended_count"] == 2
+    assert history["total_lessons"] == 3
+    assert history["attendance_rate"] == 66.7
+    by_lesson = {item["lesson_id"]: item for item in history["lessons"]}
+    assert by_lesson["lesson_1"]["status"] == "present"
+    assert by_lesson["lesson_1"]["method"] == "qr"
+    assert by_lesson["lesson_2"]["status"] == "absent"
+    assert by_lesson["lesson_3"]["status"] == "present"
+    assert by_lesson["lesson_3"]["method"] == "manual"
+
+    # Verify HTTP endpoint enforcement (401 unauthenticated, 200 authenticated student)
+    app = create_app(config=cfg, repository=repo)
+    anon_client = TestClient(app)
+    assert anon_client.get("/api/attendance/my-history").status_code == 401
+
+    stu_client = TestClient(app)
+    login_res = stu_client.post(
+        "/api/auth/student/login", json={"email": "alice@ariel.ac.il"}
+    )
+    assert login_res.status_code == 200
+    http_hist = stu_client.get("/api/attendance/my-history")
+    assert http_hist.status_code == 200
+    body = http_hist.json()
+    assert body["attended_count"] == 2
+    assert body["total_lessons"] == 3
+    assert len(body["lessons"]) == 3

@@ -313,3 +313,27 @@ class VideoSummarizer:
         ]
         items.sort(key=lambda s: int(s.get("created_at", 0)), reverse=True)
         return items
+
+    def delete_summary(self, summary_id: str) -> dict[str, Any]:
+        """
+        Purpose:
+            Delete a persisted lecture video summary record from `/video_summaries/{summary_id}`
+            in Firebase RTDB.
+        Inputs:
+            summary_id (str): Unique identifier of the video summary to remove.
+        Outputs:
+            dict[str, Any]: Deletion confirmation dictionary (`summary_id`, `status="deleted"`).
+            Raises `ValueError` if `summary_id` is empty or does not exist.
+        """
+        import re
+
+        clean_id = re.sub(r"[.$#\[\]/]", "_", (summary_id or "").strip())
+        if not clean_id:
+            raise ValueError("summary_id is required.")
+
+        existing = self.repository.get(f"/video_summaries/{clean_id}")
+        if not isinstance(existing, dict):
+            raise ValueError(f"Video summary '{clean_id}' was not found.")
+
+        self.repository.delete(f"/video_summaries/{clean_id}")
+        return {"summary_id": clean_id, "status": "deleted"}

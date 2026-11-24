@@ -998,3 +998,76 @@ class AttendanceManager:
         buffer = io.BytesIO()
         wb.save(buffer)
         return buffer.getvalue()
+
+    def get_student_attendance_history(self, student_id: str) -> dict[str, Any]:
+        """
+        Purpose:
+            Build a per-lesson attendance history summary for a single student across
+            all lessons stored in `/attendance_sessions`, including overall attendance count,
+            percentage, and Present/Absent status per lesson.
+        Inputs:
+            student_id (str): Student identifier from the `/students` roster.
+        Outputs:
+            dict[str, Any]: Dictionary containing `student_id`, `attended_count`,
+            `total_lessons`, `attendance_rate`, and chronological `lessons` list.
+        """
+        clean_sid = (student_id or "").strip()
+        if not clean_sid:
+            raise ValueError("student_id is required to view attendance history.")
+
+        sessions = self.list_sessions()
+        # Sort lessons chronologically (oldest first -> Lesson 1, Lesson 2, ...)
+        sessions.sort(
+            key=lambda item: (
+                int(item.get("started_at", 0)),
+                str(item.get("lesson_id", "")),
+            )
+        )
+
+        lessons: list[dict[str, Any]] = []
+        attended_count = 0
+
+        for sess in sessions:
+            lesson_id = str(sess.get("lesson_id", "")).strip()
+            if not lesson_id:
+                continue
+            records = (
+                sess.get("records")
+                if isinstance(sess.get("records"), dict)
+                else {}
+            )
+            rec = records.get(clean_sid)
+            is_present = isinstance(rec, dict) and rec.get("status") == "present"
+            if is_present:
+                attended_count += 1
+
+            lessons.append(
+                {
+                    "lesson_id": lesson_id,
+                    "lesson_title": str(sess.get("lesson_title") or lesson_id),
+                    "active": bool(sess.get("active", False)),
+                    "started_at": sess.get("started_at"),
+                    "status": "present" if is_present else "absent",
+                    "method": rec.get("method") if isinstance(rec, dict) and is_present else None,
+                    "checked_in_at": (
+                        rec.get("checked_in_at") if isinstance(rec, dict) and is_present else None
+                    ),
+                    "geofence_status": (
+                        rec.get("geofence_status") if isinstance(rec, dict) and is_present else None
+                    ),
+                }
+            )
+
+        total_lessons = len(lessons)
+        attendance_rate = (
+            round((attended_count / total_lessons) * 100.0, 1)
+            if total_lessons > 0
+            else 0.0
+        )
+        return {
+            "student_id": clean_sid,
+            "attended_count": attended_count,
+            "total_lessons": total_lessons,
+            "attendance_rate": attendance_rate,
+            "lessons": lessons,
+        }

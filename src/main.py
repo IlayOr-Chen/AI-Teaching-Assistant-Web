@@ -29,6 +29,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -87,9 +88,6 @@ DEFAULT_ROSTER_ASSET = (
     Path(__file__).resolve().parent.parent
     / "assets"
     / "courseid_130158_participants.xlsx"
-)
-DEFAULT_CLASSROOM_PHOTO_ASSET = (
-    Path(__file__).resolve().parent.parent / "assets" / "p3.jpeg"
 )
 
 
@@ -422,6 +420,26 @@ def create_app(
             "/static", StaticFiles(directory=str(STATIC_DIR)), name="static"
         )
 
+    @fastapi_app.exception_handler(Exception)
+    async def unhandled_exception_handler(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        """
+        Purpose:
+            Ensure any unexpected unhandled server exception returns a clean JSON
+            `{"detail": ...}` payload rather than a raw HTML/text 500 response.
+        Inputs:
+            request (Request): Incoming FastAPI request.
+            exc (Exception): Unhandled exception instance.
+        Outputs:
+            JSONResponse: Structured HTTP 500 JSON error response.
+        """
+        logger.exception("Unhandled exception on %s: %s", request.url.path, exc)
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"detail": f"Server error: {exc}"},
+        )
+
     @fastapi_app.get("/", response_class=HTMLResponse)
     async def serve_index() -> Any:
         """
@@ -642,10 +660,12 @@ def create_app(
                         "Invalid roster file type. Please upload an Excel (.xlsx) file."
                     )
                 content = await file.read()
-                return importer.import_from_excel(content)
+                return await run_in_threadpool(importer.import_from_excel, content)
 
             if use_default_asset:
-                return importer.import_from_excel(DEFAULT_ROSTER_ASSET)
+                return await run_in_threadpool(
+                    importer.import_from_excel, DEFAULT_ROSTER_ASSET
+                )
 
             raise ValueError(
                 "Please upload an Excel (.xlsx) file or set use_default_asset=true."
@@ -800,6 +820,59 @@ def create_app(
             "has_classroom_coords": has_coords,
             "students": names,
         }
+
+    @fastapi_app.get("/api/attendance/my-history", response_class=JSONResponse)
+    async def student_attendance_history_endpoint(
+        request: Request,
+        student_id: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Student-accessible endpoint returning chronological per-lesson attendance
+            history (`present` or `absent`) and overall attendance percentage for the
+            authenticated student (or a target `student_id` when called by Lecturer).
+        Inputs:
+            request (Request): Incoming FastAPI request with student or lecturer JWT session.
+            student_id (str | None): Optional student ID override when requested by Lecturer.
+        Outputs:
+            dict[str, Any]: Attendance history summary (`attended_count`, `total_lessons`,
+            `attendance_rate`, `lessons`).
+        """
+        svc: AuthService = request.app.state.auth_service
+        auth_header = request.headers.get("Authorization", "").strip()
+        bearer = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else None
+        student_cookie = request.cookies.get(STUDENT_COOKIE_NAME)
+        lecturer_cookie = request.cookies.get(LECTURER_COOKIE_NAME)
+
+        claims: dict[str, Any] | None = None
+        for tok in (student_cookie, bearer, lecturer_cookie):
+            if not tok:
+                continue
+            try:
+                claims = svc.verify_jwt_token(tok)
+                break
+            except Exception:
+                continue
+
+        if claims is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Please sign in as a student to view your attendance history.",
+            )
+
+        role = str(claims.get("role", "student"))
+        if role == "lecturer" and student_id and student_id.strip():
+            target_sid = student_id.strip()
+        else:
+            target_sid = str(claims.get("sub", "")).strip()
+
+        mgr: AttendanceManager = request.app.state.attendance_manager
+        try:
+            return await run_in_threadpool(mgr.get_student_attendance_history, target_sid)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
 
     @fastapi_app.get(
         "/api/attendance/sessions/{lesson_id}", response_class=JSONResponse
@@ -1067,55 +1140,73 @@ def create_app(
         file: UploadFile | None = File(default=None),
         lesson_id: str | None = Query(default=None),
         registered_count: int | None = Query(default=None),
-        use_default_asset: bool = Query(default=False),
     ) -> dict[str, Any]:
         """
         Purpose:
             Lecturer-protected endpoint that runs local Ultralytics YOLO person detection
-            on an uploaded classroom photo (or `/assets/p3.jpeg` when `use_default_asset=true`),
-            returns the annotated image with bounding boxes and confidence scores, and
-            computes the GREEN / ORANGE / RED status indicator against self-registered attendance.
+            on an uploaded classroom photo in a worker thread, persists and returns the
+            annotated image Data URL with bounding boxes and confidence scores, and computes
+            the GREEN / ORANGE / RED status indicator against self-registered attendance.
         Inputs:
             request (Request): Incoming FastAPI request (requires Lecturer JWT).
-            file (UploadFile | None): Uploaded JPEG/PNG classroom photo.
+            file (UploadFile | None): Uploaded JPEG/PNG/WebP classroom photo.
             lesson_id (str | None): Optional lesson session ID to link and compare with.
             registered_count (int | None): Optional override for self-registered student count.
-            use_default_asset (bool): When True and no file is uploaded, analyzes `/assets/p3.jpeg`.
         Outputs:
-            dict[str, Any]: Full YOLO headcount report and annotated image Data URL.
+            dict[str, Any]: Full YOLO headcount report and persisted annotated image Data URL.
         """
         svc: AuthService = request.app.state.auth_service
         svc.require_lecturer_claims(request)
 
         counter: PhotoHeadCounter = request.app.state.photo_head_counter
         try:
-            if file is not None:
-                filename = (file.filename or "").lower()
-                if not filename.endswith((".jpg", ".jpeg", ".png", ".webp")):
-                    raise ValueError(
-                        "Invalid photo file type. Please upload a JPEG, PNG, or WebP classroom photo."
-                    )
-                image_bytes = await file.read()
-                return counter.analyze_classroom_photo(
-                    image_source=image_bytes,
-                    lesson_id=lesson_id,
-                    registered_count=registered_count,
+            if file is None:
+                raise ValueError(
+                    "Please upload a classroom photo (JPEG, PNG, or WebP)."
                 )
-
-            if use_default_asset:
-                return counter.analyze_classroom_photo(
-                    image_source=DEFAULT_CLASSROOM_PHOTO_ASSET,
-                    lesson_id=lesson_id,
-                    registered_count=registered_count,
+            filename = (file.filename or "").lower()
+            if not filename.endswith((".jpg", ".jpeg", ".png", ".webp")):
+                raise ValueError(
+                    "Invalid photo file type. Please upload a JPEG, PNG, or WebP classroom photo."
                 )
-
-            raise ValueError(
-                "Please upload a classroom photo or set use_default_asset=true."
+            image_bytes = await file.read()
+            return await run_in_threadpool(
+                counter.analyze_classroom_photo,
+                image_source=image_bytes,
+                lesson_id=lesson_id,
+                registered_count=registered_count,
             )
         except FileNotFoundError as exc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
             ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+    @fastapi_app.delete("/api/attendance/headcount", response_class=JSONResponse)
+    @fastapi_app.post("/api/attendance/headcount/reset", response_class=JSONResponse)
+    async def reset_classroom_headcount_endpoint(
+        request: Request,
+        lesson_id: str = Query(...),
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Lecturer-protected endpoint to clear the saved YOLO headcount, discrepancy status,
+            and annotated classroom photo for `lesson_id`.
+        Inputs:
+            request (Request): Incoming FastAPI request (requires Lecturer JWT).
+            lesson_id (str): Target lesson identifier.
+        Outputs:
+            dict[str, Any]: Reset confirmation dictionary.
+        """
+        svc: AuthService = request.app.state.auth_service
+        svc.require_lecturer_claims(request)
+
+        counter: PhotoHeadCounter = request.app.state.photo_head_counter
+        try:
+            return await run_in_threadpool(counter.reset_headcount, lesson_id)
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
@@ -1475,7 +1566,8 @@ def create_app(
         header_model = request.headers.get("X-Gemini-Model")
         try:
             if youtube_url and youtube_url.strip():
-                return summarizer.summarize_video(
+                return await run_in_threadpool(
+                    summarizer.summarize_video,
                     youtube_url=youtube_url.strip(),
                     lesson_tag=lesson_tag,
                     lecturer_notes=lecturer_notes,
@@ -1487,7 +1579,8 @@ def create_app(
                     "Please upload an MP4 (.mp4) video file or provide a public YouTube URL."
                 )
             raw_bytes = await file.read()
-            return summarizer.summarize_video(
+            return await run_in_threadpool(
+                summarizer.summarize_video,
                 filename=file.filename or "",
                 video_bytes=raw_bytes,
                 content_type=file.content_type,
@@ -1534,7 +1627,8 @@ def create_app(
         header_api_key = request.headers.get("X-Gemini-Api-Key")
         header_model = request.headers.get("X-Gemini-Model")
         try:
-            return summarizer.summarize_video(
+            return await run_in_threadpool(
+                summarizer.summarize_video,
                 youtube_url=payload.youtube_url,
                 lesson_tag=payload.lesson_tag,
                 lecturer_notes=payload.lecturer_notes,
@@ -1569,6 +1663,36 @@ def create_app(
         summarizer: VideoSummarizer = request.app.state.video_summarizer
         items = summarizer.list_summaries()
         return {"count": len(items), "summaries": items}
+
+    @fastapi_app.delete(
+        "/api/video/summaries/{summary_id}", response_class=JSONResponse
+    )
+    async def delete_video_summary_endpoint(
+        summary_id: str, request: Request
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Lecturer-protected endpoint removing a saved video summary from Firebase
+            RTDB under `/video_summaries/{summary_id}`.
+        Inputs:
+            summary_id (str): Target summary identifier.
+            request (Request): Incoming FastAPI request (requires Lecturer JWT).
+        Outputs:
+            dict[str, Any]: Deletion confirmation payload.
+        """
+        svc: AuthService = request.app.state.auth_service
+        svc.require_lecturer_claims(request)
+
+        summarizer: VideoSummarizer = request.app.state.video_summarizer
+        try:
+            return await run_in_threadpool(summarizer.delete_summary, summary_id)
+        except ValueError as exc:
+            status_code = (
+                status.HTTP_404_NOT_FOUND
+                if "not found" in str(exc).lower()
+                else status.HTTP_400_BAD_REQUEST
+            )
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
     @fastapi_app.post("/api/homework/assignments", response_class=JSONResponse)
     async def create_homework_assignment_endpoint(
@@ -1680,7 +1804,8 @@ def create_app(
         reviewer: HomeworkReviewer = request.app.state.homework_reviewer
         try:
             if repo_url and repo_url.strip():
-                return reviewer.submit_homework_pdf(
+                return await run_in_threadpool(
+                    reviewer.submit_homework_pdf,
                     assignment_id=assignment_id,
                     student_id=effective_id,
                     student_name=effective_name,
@@ -1694,7 +1819,8 @@ def create_app(
                     "Please upload a supported homework file or provide a public Git repository URL."
                 )
             pdf_bytes = await file.read()
-            return reviewer.submit_homework_pdf(
+            return await run_in_threadpool(
+                reviewer.submit_homework_pdf,
                 assignment_id=assignment_id,
                 student_id=effective_id,
                 student_name=effective_name,
@@ -1755,7 +1881,8 @@ def create_app(
 
         reviewer: HomeworkReviewer = request.app.state.homework_reviewer
         try:
-            return reviewer.submit_homework_pdf(
+            return await run_in_threadpool(
+                reviewer.submit_homework_pdf,
                 assignment_id=assignment_id,
                 student_id=effective_id,
                 student_name=effective_name,
@@ -1815,7 +1942,8 @@ def create_app(
 
         reviewer: HomeworkReviewer = request.app.state.homework_reviewer
         try:
-            return reviewer.get_student_review_and_comparison(
+            return await run_in_threadpool(
+                reviewer.get_student_review_and_comparison,
                 assignment_id=assignment_id,
                 student_id=target_student_id,
                 viewer_role=caller["role"],

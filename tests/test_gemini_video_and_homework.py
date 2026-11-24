@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+import tempfile
 import time
 from typing import Any
 import zipfile
@@ -241,8 +242,12 @@ def test_gemini_client_settings_masking_and_custom_model_id(
     monkeypatch.setattr(genai, "Client", RecordingClient)
     client._build_genai_client("AIzaSyTestKey123")
     client._build_genai_client("AQ.AbCdEf123456")
-    assert client_calls[0] == {"api_key": "AIzaSyTestKey123"}
-    assert client_calls[1] == {"vertexai": True, "api_key": "AQ.AbCdEf123456"}
+    assert client_calls[0]["api_key"] == "AIzaSyTestKey123"
+    assert "vertexai" not in client_calls[0]
+    assert client_calls[0]["http_options"].timeout == 75_000
+    assert client_calls[1]["vertexai"] is True
+    assert client_calls[1]["api_key"] == "AQ.AbCdEf123456"
+    assert client_calls[1]["http_options"].timeout == 75_000
 
 
 def test_gemini_files_api_large_mp4_upload_polling_and_cleanup(
@@ -292,6 +297,8 @@ def test_gemini_files_api_large_mp4_upload_polling_and_cleanup(
             events["uploaded_temp_path"] = file
             assert file.isascii()
             assert Path(file).is_file()
+            # Must write inside OS temp directory (never inside watched project source dirs)
+            assert Path(file).resolve().parent == Path(tempfile.gettempdir()).resolve()
             return FakeUploadedFile("files/lec_hebrew_123", "PROCESSING")
 
         def get(self, *, name: str) -> FakeUploadedFile:
@@ -845,6 +852,16 @@ def test_gemini_video_and_homework_http_endpoints_and_ui_assets() -> None:
     )
     assert ok_vid.status_code == 200
     assert "delivery_insights" in ok_vid.json()
+    vid_summary_id = ok_vid.json()["summary_id"]
+
+    # 2b. Delete Video AI summary (lecturer-protected, 404 on unknown ID, 200 removes record)
+    assert stu_client.delete(f"/api/video/summaries/{vid_summary_id}").status_code == 403
+    assert lec_client.delete("/api/video/summaries/nonexistent_vid").status_code == 404
+    del_vid = lec_client.delete(f"/api/video/summaries/{vid_summary_id}")
+    assert del_vid.status_code == 200
+    assert del_vid.json()["status"] == "deleted"
+    remaining_ids = {s["summary_id"] for s in lec_client.get("/api/video/summaries").json()["summaries"]}
+    assert vid_summary_id not in remaining_ids
 
     # 3. Lecturer creates homework assignment
     hw_res = lec_client.post(
@@ -868,6 +885,13 @@ def test_gemini_video_and_homework_http_endpoints_and_ui_assets() -> None:
     )
     assert missing_key_hw.status_code == 400
     assert "Please enter your Gemini API Key" in missing_key_hw.json()["detail"]
+
+    missing_key_repo = stu_client.post(
+        f"/api/homework/assignments/{aid}/submit-repo",
+        json={"repo_url": "https://github.com/owner/repo"},
+    )
+    assert missing_key_repo.status_code == 400
+    assert "Please enter your Gemini API Key" in missing_key_repo.json()["detail"]
 
     # 4b. Student sends BYOK headers + unsupported .exe -> 400; valid .pdf -> 200 (gated)
     stu_byok_headers = {
@@ -929,5 +953,6 @@ def test_gemini_video_and_homework_http_endpoints_and_ui_assets() -> None:
     assert "X-Gemini-Api-Key" in ai_js.text
     assert "X-Gemini-Model" in ai_js.text
     assert "/api/video/summarize-youtube" in ai_js.text
+    assert "/api/video/summaries/" in ai_js.text
     assert "Submit Public Git Repo URL" in ai_js.text
     assert "__custom__" not in ai_js.text

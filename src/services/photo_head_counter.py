@@ -7,7 +7,7 @@ Purpose:
     confidence indicator.
 Inputs:
     `FirebaseRepository` persistence instance, `AppConfig` runtime settings, and
-    classroom photo files or byte streams (tested in real life on `/assets/p3.jpeg`).
+    uploaded classroom photo files or byte streams.
 Outputs:
     `PhotoHeadCounter` class producing detection metrics, annotated image Data URLs,
     and color-coded confidence assessments.
@@ -315,8 +315,17 @@ class PhotoHeadCounter:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             annotated.save(out_path, format="JPEG", quality=88)
 
+        # Keep persisted Base64 Data URL compact (<= 1024px, JPEG quality 72) so
+        # it persists cleanly in Firebase RTDB and loads rapidly across tabs/refreshes.
+        web_img = annotated
+        max_dim = 1024
+        if annotated.width > max_dim or annotated.height > max_dim:
+            web_img = annotated.copy()
+            resample = getattr(Image, "Resampling", Image).LANCZOS
+            web_img.thumbnail((max_dim, max_dim), resample)
+
         buffer = io.BytesIO()
-        annotated.save(buffer, format="JPEG", quality=85)
+        web_img.save(buffer, format="JPEG", quality=72, optimize=True)
         b64_jpeg = base64.b64encode(buffer.getvalue()).decode("ascii")
         return f"data:image/jpeg;base64,{b64_jpeg}"
 
@@ -326,7 +335,8 @@ class PhotoHeadCounter:
         """
         Purpose:
             Run local YOLO inference filtering strictly for `person` (`class_id == 0`)
-            and extract sorted bounding boxes and confidence scores.
+            without writing runtime artifacts into the project directory, and extract
+            sorted bounding boxes and confidence scores.
         Inputs:
             pil_image (Image.Image): Input RGB classroom photo.
             conf_threshold (float): Minimum confidence threshold (`0.0`..`1.0`).
@@ -339,6 +349,7 @@ class PhotoHeadCounter:
             classes=[PERSON_CLASS_ID],
             conf=conf_threshold,
             imgsz=self.imgsz,
+            save=False,
             verbose=False,
         )
         if not results:
@@ -465,13 +476,33 @@ class PhotoHeadCounter:
 
         if lesson_id and lesson_id.strip():
             clean_lesson = lesson_id.strip()
-            # Persist compact headcount summary in Firebase RTDB under /attendance_sessions/{lesson_id}/yolo_headcount
-            rtdb_summary = {
-                k: v for k, v in report.items() if k != "annotated_image_data_url"
-            }
+            # Persist full YOLO report (including compact annotated_image_data_url) in Firebase RTDB
+            # under /attendance_sessions/{lesson_id}/yolo_headcount so it survives refreshes/tab switches.
             self.repository.set(
                 f"/attendance_sessions/{clean_lesson}/yolo_headcount",
-                rtdb_summary,
+                report,
             )
 
         return report
+
+    def reset_headcount(self, lesson_id: str) -> dict[str, Any]:
+        """
+        Purpose:
+            Clear the persisted YOLO headcount report, discrepancy status, and annotated
+            classroom photo for `lesson_id` in Firebase RTDB.
+        Inputs:
+            lesson_id (str): Target lesson identifier.
+        Outputs:
+            dict[str, Any]: Reset confirmation dictionary (`lesson_id`, `status`, `yolo_headcount`).
+            Raises `ValueError` if `lesson_id` is empty.
+        """
+        clean_lesson = (lesson_id or "").strip()
+        if not clean_lesson:
+            raise ValueError("lesson_id is required to reset YOLO headcount.")
+
+        self.repository.delete(f"/attendance_sessions/{clean_lesson}/yolo_headcount")
+        return {
+            "lesson_id": clean_lesson,
+            "status": "reset",
+            "yolo_headcount": None,
+        }
