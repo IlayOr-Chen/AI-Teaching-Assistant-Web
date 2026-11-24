@@ -203,7 +203,7 @@ def test_attendance_management_and_yolo_ui_wiring() -> None:
         "Export Excel (.xlsx)",
         "Upload classroom photo",
         "Reset YOLO",
-        "Lesson Scope (Controls Both YOLO Headcount & Roster Below)",
+        "Lesson Scope",
         "YOLO Detected Count",
         "Self-Registered Count",
         "Mark Present",

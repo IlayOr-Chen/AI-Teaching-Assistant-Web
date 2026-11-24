@@ -1,7 +1,8 @@
 /**
- * Purpose: Frontend UI module for Feature 4 (ML Lecture Video Summary — MP4 Only + Gemini Files API
- *          with Lecturer API key & valid model settings) and Feature 5 (Deep Homework Review &
- *          Peer Comparison — Multi-Format Files & Public Git Repo URLs + Gemini + Gated Release Rule).
+ * Purpose: Frontend UI module for Feature 4 (AI Lecture Video Summarizer — YouTube URL Only +
+ *          Gemini VideoMetadata content_layers fast 45-90 min lecture analysis) and Feature 5
+ *          (Deep Homework Review & Peer Comparison — Multi-Format Files & Public Git Repo URLs +
+ *          Gemini + Gated Release Rule).
  * Inputs:  DOM container and `{ user, role }` context.
  * Outputs: Interactive Video AI and Homework tabs.
  */
@@ -9,7 +10,7 @@
 import { api } from './api.js';
 import { icon } from './icons.js';
 import {
-    el, mount, toast, button, withLoading, formatTime,
+    el, mount, toast, button, withLoading, copyText, formatTime,
 } from './ui.js';
 
 const LESSON_TAGS = ['Lesson 1', 'Lesson 2', 'Lesson 3', 'Lesson 4', 'Lesson 5', 'General'];
@@ -22,6 +23,12 @@ const VALID_GEMINI_MODELS = [
     'gemini-2.5-flash',
 ];
 
+const YOUTUBE_VIDEO_MODE_OPTIONS = [
+    { id: 'transcript', label: 'Fast (Transcript)', hint: 'Default — ideal for long 45–90 min lectures' },
+    { id: 'audio', label: 'Audio Only', hint: 'Analyzes spoken audio & delivery without video frames' },
+    { id: 'full_video', label: 'Full Video (Low FPS)', hint: 'Uses fps=0.2 for short lectures with slides/whiteboards' },
+];
+
 const STUDENT_BYOK_KEY_STORAGE = 'ta_student_gemini_api_key';
 const STUDENT_BYOK_MODEL_STORAGE = 'ta_student_gemini_model';
 
@@ -31,12 +38,76 @@ const HOMEWORK_FILE_ACCEPT = [
     '.js', '.ts', '.html', '.css', '.json',
 ].join(',');
 
+/**
+ * Purpose: Format a rich lecture video summary record into clean Markdown for clipboard copying.
+ * Inputs:  s (object) lecture video summary record.
+ * Outputs: string Markdown document.
+ */
+function formatSummaryAsMarkdown(s) {
+    const del = s.delivery_insights || {};
+    const lines = [
+        `# ${s.lesson_tag || 'Lecture'} — AI Lecture Video Summary`,
+        `- **YouTube URL:** ${s.youtube_url || s.filename || '-'}`,
+        `- **Model Used:** ${s.model_used || DEFAULT_GEMINI_MODEL}`,
+        `- **Analysis Mode:** ${s.video_mode || 'transcript'}`,
+        '',
+        '## Executive Summary (TL;DR)',
+        s.executive_summary || '-',
+    ];
+
+    if (s.detailed_overview && String(s.detailed_overview).trim()) {
+        lines.push('', '## Lecture Overview & Walkthrough', String(s.detailed_overview).trim());
+    }
+
+    if (Array.isArray(s.key_concepts) && s.key_concepts.length) {
+        lines.push('', '## Key Concepts & Definitions');
+        for (const c of s.key_concepts) {
+            if (c && typeof c === 'object') {
+                lines.push(`- **${c.term || 'Concept'}:** ${c.explanation || ''}`);
+            } else if (c) {
+                lines.push(`- ${c}`);
+            }
+        }
+    }
+
+    if (Array.isArray(s.key_topics) && s.key_topics.length) {
+        lines.push('', '## Key Topics Covered');
+        for (const t of s.key_topics) lines.push(`- ${t}`);
+    }
+
+    if (Array.isArray(s.core_takeaways) && s.core_takeaways.length) {
+        lines.push('', '## Core Learning Takeaways');
+        for (const t of s.core_takeaways) lines.push(`- ${t}`);
+    }
+
+    if (Array.isArray(s.study_questions) && s.study_questions.length) {
+        lines.push('', '## Quick Review Questions');
+        s.study_questions.forEach((q, idx) => lines.push(`${idx + 1}. ${q}`));
+    }
+
+    if (Array.isArray(s.action_items) && s.action_items.length) {
+        lines.push('', '## Action Items & Next Steps');
+        for (const a of s.action_items) lines.push(`- ${a}`);
+    }
+
+    lines.push(
+        '',
+        '## Lecturer Delivery Insights',
+        `- **Overall Rating:** ${del.overall_rating || 'Excellent'}`,
+        `- **Pacing:** ${del.pacing || '-'}`,
+        `- **Clarity:** ${del.clarity || '-'}`,
+        `- **Audio Quality:** ${del.audio_quality || '-'}`,
+    );
+
+    return lines.join('\n');
+}
+
 /* ================================================================== */
-/* Feature 4 — ML Lecture Video Summary (MP4 Only + Gemini Files API) */
+/* Feature 4 — AI Lecture Video Summarizer (YouTube URL Only)         */
 /* ================================================================== */
 
 /**
- * Purpose: Render the Lecturer's Gemini Settings panel + MP4 Lecture Video Summarizer tab.
+ * Purpose: Render the Lecturer's Gemini Settings panel + YouTube Lecture Video Summarizer tab.
  * Inputs:  container (HTMLElement); ctx { user, role }.
  * Outputs: void.
  */
@@ -44,7 +115,7 @@ export function renderVideoSummaryTab(container, ctx) {
     const settingsStatusChip = el('span', { class: 'chip' }, 'Loading settings…');
     const apiKeyInput = el('input', {
         type: 'password',
-        placeholder: 'Enter AI Studio (AIza...) or Vertex AI Express (AQ....) key…',
+        placeholder: 'Enter AI Studio (AIza...) or AQ.... Gemini API key…',
         autocomplete: 'off',
     });
 
@@ -62,20 +133,27 @@ export function renderVideoSummaryTab(container, ctx) {
         modelInput.value = clean || DEFAULT_GEMINI_MODEL;
     };
 
+    const applySettingsToChip = (s) => {
+        const modelId = (s && s.model_id) || getSelectedModelId();
+        setSelectedModelId(modelId);
+        const hasKey = Boolean(s && (s.has_api_key || s.has_key));
+        const masked = (s && (s.masked_api_key || s.masked_key)) || '';
+        if (hasKey && masked) {
+            settingsStatusChip.className = 'chip ok';
+            settingsStatusChip.textContent = `Key active (${masked}) · Model: ${modelId}`;
+        } else {
+            settingsStatusChip.className = 'chip warn';
+            settingsStatusChip.textContent = `No API key configured · Model: ${modelId}`;
+        }
+    };
+
     const saveSettingsBtn = button('Save Gemini Settings', { cls: 'primary sm', type: 'submit', iconName: 'sparkles' });
     const clearSettingsKeyBtn = button('Clear Key', { cls: 'sm ghost danger', type: 'button' });
 
     const loadSettings = async () => {
         try {
             const s = await api.get('/api/settings/gemini');
-            setSelectedModelId(s.model_id || DEFAULT_GEMINI_MODEL);
-            if (s.has_api_key) {
-                settingsStatusChip.className = 'chip ok';
-                settingsStatusChip.textContent = `Key active (${s.masked_api_key}) · Model: ${s.model_id}`;
-            } else {
-                settingsStatusChip.className = 'chip danger';
-                settingsStatusChip.textContent = 'Gemini key missing — enter your AIza... or AQ.... key above';
-            }
+            applySettingsToChip(s);
         } catch (err) {
             toast(err.message, 'error');
         }
@@ -83,7 +161,7 @@ export function renderVideoSummaryTab(container, ctx) {
 
     const settingsForm = el('form', { class: 'stack' }, [
         el('div', { class: 'grid grid-2' }, [
-            el('label', { class: 'field' }, ['Gemini API Key (AI Studio AIza... or Vertex Express AQ....)', apiKeyInput]),
+            el('label', { class: 'field' }, ['Gemini API Key (AIza... or AQ....)', apiKeyInput]),
             el('label', { class: 'field' }, ['Gemini Model ID (free-text or preset)', modelInput]),
         ]),
         el('div', { class: 'row' }, [
@@ -104,19 +182,19 @@ export function renderVideoSummaryTab(container, ctx) {
         withLoading(saveSettingsBtn, async () => {
             const payload = { model_id: getSelectedModelId() };
             if (apiKeyInput.value.trim()) payload.api_key = apiKeyInput.value.trim();
-            await api.put('/api/settings/gemini', payload);
+            const updated = await api.put('/api/settings/gemini', payload);
             apiKeyInput.value = '';
+            applySettingsToChip(updated);
             toast(`Gemini settings updated (model: ${payload.model_id}).`, 'success');
-            await loadSettings();
         });
     });
 
     clearSettingsKeyBtn.addEventListener('click', () => {
         withLoading(clearSettingsKeyBtn, async () => {
-            await api.put('/api/settings/gemini', { api_key: '', model_id: getSelectedModelId() });
             apiKeyInput.value = '';
+            const cleared = await api.delete('/api/settings/gemini');
+            applySettingsToChip(cleared);
             toast('Stored Lecturer Gemini API key cleared.', 'info');
-            await loadSettings();
         });
     });
 
@@ -127,7 +205,7 @@ export function renderVideoSummaryTab(container, ctx) {
         return headers;
     };
 
-    /* ----- YouTube URL & MP4 Upload (<= 20 MB) + Summary List ----- */
+    /* ----- YouTube URL Summarizer + Mode Selector Pills + Summary List ----- */
     const lessonSelect = el('select', {}, LESSON_TAGS.map((t) => el('option', { value: t }, t)));
     const notesInput = el('input', {
         type: 'text',
@@ -138,15 +216,54 @@ export function renderVideoSummaryTab(container, ctx) {
         placeholder: 'https://www.youtube.com/watch?v=... (Public YouTube Lecture URL)',
         style: 'min-width:260px;flex:1',
     });
+
+    let activeVideoMode = 'transcript';
+    const modePillButtons = new Map();
+    const modePillsBar = el('div', {
+        class: 'radius-pills',
+        role: 'group',
+        'aria-label': 'YouTube lecture analysis mode',
+    }, YOUTUBE_VIDEO_MODE_OPTIONS.map((opt) => {
+        const pill = el('button', {
+            type: 'button',
+            class: `radius-pill ${opt.id === activeVideoMode ? 'active' : ''}`.trim(),
+            title: opt.hint,
+            onclick: () => {
+                activeVideoMode = opt.id;
+                for (const [id, btnNode] of modePillButtons.entries()) {
+                    btnNode.classList.toggle('active', id === activeVideoMode);
+                }
+            },
+        }, opt.label);
+        modePillButtons.set(opt.id, pill);
+        return pill;
+    }));
+
     const analyzeYoutubeBtn = button('Analyze YouTube Video', { cls: 'primary', iconName: 'sparkles' });
-    const mp4FileInput = el('input', { type: 'file', accept: '.mp4,video/mp4', class: 'hidden' });
-    const uploadMp4Btn = button('Upload MP4 File (<= 20 MB)', { cls: '', iconName: 'video' });
     const processingHost = el('div', { class: 'hidden' });
     const summariesHost = el('div', { class: 'stack' });
 
     const renderSummaryCard = (s) => {
         const del = s.delivery_insights || {};
-        const sizeLabel = s.source_type === 'youtube' ? 'YouTube Video' : `${s.file_size_kb} KB`;
+        const modeLabelMap = {
+            transcript: 'Fast (Transcript)',
+            audio: 'Audio Only',
+            full_video: 'Full Video (Low FPS)',
+        };
+        const modeBadge = modeLabelMap[s.video_mode] || 'YouTube Video';
+
+        const copyBtn = button('Copy', {
+            cls: 'sm ghost',
+            iconName: 'copy',
+            'aria-label': `Copy summary ${s.filename || s.summary_id}`,
+        });
+        copyBtn.addEventListener('click', async () => {
+            const md = formatSummaryAsMarkdown(s);
+            const ok = await copyText(md);
+            if (ok) toast('Summary copied to clipboard', 'success');
+            else toast('Could not copy summary to clipboard', 'warning');
+        });
+
         const deleteBtn = button('Delete', {
             cls: 'sm ghost danger',
             iconName: 'trash',
@@ -164,29 +281,67 @@ export function renderVideoSummaryTab(container, ctx) {
             });
         });
 
+        const rawOverview = String(s.detailed_overview || '').trim();
+        const overviewParagraphs = rawOverview
+            ? rawOverview.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean)
+            : [];
+        const overviewSection = overviewParagraphs.length
+            ? el('div', { class: 'overview-box' }, [
+                el('div', { class: 'row' }, [
+                    el('span', { html: icon('file') }),
+                    el('h3', {}, 'Lecture Overview & Walkthrough'),
+                ]),
+                ...overviewParagraphs.map((para) => el('p', { class: 'overview-paragraph', dir: 'auto' }, para)),
+            ])
+            : null;
+
+        const keyConcepts = Array.isArray(s.key_concepts) ? s.key_concepts : [];
+        const conceptsSection = keyConcepts.length
+            ? el('div', { class: 'stack', style: 'gap:0.55rem' }, [
+                el('h3', {}, 'Key Concepts & Definitions'),
+                el('div', { class: 'concepts-grid' }, keyConcepts.map((c) => {
+                    const term = (c && typeof c === 'object' ? c.term : 'Concept') || 'Concept';
+                    const explanation = (c && typeof c === 'object' ? c.explanation : String(c || '')) || '';
+                    return el('div', { class: 'concept-card' }, [
+                        el('div', { class: 'concept-term', dir: 'auto' }, term),
+                        el('div', { class: 'concept-explanation', dir: 'auto' }, explanation),
+                    ]);
+                })),
+            ])
+            : null;
+
+        const studyQuestions = Array.isArray(s.study_questions) ? s.study_questions.filter(Boolean) : [];
+
         return el('div', { class: 'card stack' }, [
             el('div', { class: 'row' }, [
                 el('span', { class: 'chip ok' }, s.lesson_tag || 'Lesson 1'),
-                el('strong', { dir: 'auto' }, s.filename),
-                el('span', { class: 'faint' }, `${sizeLabel} · Model: ${s.model_used} · ${formatTime(s.created_at)}`),
+                el('strong', { dir: 'auto' }, s.youtube_url || s.filename),
+                el('span', { class: 'faint' }, `${modeBadge} · Model: ${s.model_used} · ${formatTime(s.created_at)}`),
                 el('span', { class: 'spacer' }),
                 el('span', { class: 'chip ok' }, `Delivery: ${del.overall_rating || 'Excellent'}`),
+                copyBtn,
                 deleteBtn,
             ]),
             el('div', { class: 'banner info' }, [
                 el('span', { html: icon('sparkles') }),
-                el('span', {}, s.executive_summary),
+                el('span', { dir: 'auto' }, s.executive_summary),
             ]),
+            overviewSection,
+            conceptsSection,
             el('div', { class: 'grid grid-2' }, [
                 el('div', { class: 'review-col' }, [
                     el('h3', {}, 'Key Topics Covered'),
-                    el('ul', { class: 'bullet-list' }, (s.key_topics || []).map((t) => el('li', {}, t))),
+                    el('ul', { class: 'bullet-list' }, (s.key_topics || []).map((t) => el('li', { dir: 'auto' }, t))),
                     el('h3', { style: 'margin-top:0.5rem' }, 'Core Learning Takeaways'),
-                    el('ul', { class: 'bullet-list' }, (s.core_takeaways || []).map((t) => el('li', {}, t))),
+                    el('ul', { class: 'bullet-list' }, (s.core_takeaways || []).map((t) => el('li', { dir: 'auto' }, t))),
                 ]),
                 el('div', { class: 'review-col peer-col' }, [
-                    el('h3', {}, 'Action Items & Next Steps'),
-                    el('ul', { class: 'bullet-list' }, (s.action_items || []).map((t) => el('li', {}, t))),
+                    studyQuestions.length ? el('h3', {}, 'Quick Review Questions') : null,
+                    studyQuestions.length
+                        ? el('ul', { class: 'bullet-list' }, studyQuestions.map((q) => el('li', { dir: 'auto' }, q)))
+                        : null,
+                    el('h3', { style: studyQuestions.length ? 'margin-top:0.5rem' : '' }, 'Action Items & Next Steps'),
+                    el('ul', { class: 'bullet-list' }, (s.action_items || []).map((t) => el('li', { dir: 'auto' }, t))),
                     el('h3', { style: 'margin-top:0.5rem' }, 'Lecturer Delivery Insights'),
                     el('div', { class: 'delivery-grid' }, [
                         el('div', { class: 'stat' }, [el('div', { class: 'stat-label' }, 'Pacing'), el('div', { class: 'faint' }, del.pacing || '-')]),
@@ -203,7 +358,7 @@ export function renderVideoSummaryTab(container, ctx) {
             const { summaries } = await api.get('/api/video/summaries');
             if (!summaries.length) {
                 mount(summariesHost, el('div', { class: 'card empty' },
-                    'No lecture video summaries yet. Paste a public YouTube URL or upload an MP4 (<= 20 MB) above for an accurate Gemini teaching & delivery summary.'));
+                    'No lecture video summaries yet. Paste a public YouTube lecture URL above to generate a structured academic recap with Gemini.'));
                 return;
             }
             mount(summariesHost, summaries.map(renderSummaryCard));
@@ -219,11 +374,12 @@ export function renderVideoSummaryTab(container, ctx) {
             return;
         }
         const activeModel = getSelectedModelId();
+        const modeMeta = YOUTUBE_VIDEO_MODE_OPTIONS.find((o) => o.id === activeVideoMode) || YOUTUBE_VIDEO_MODE_OPTIONS[0];
         mount(processingHost, el('div', { class: 'processing-pulse' }, [
             el('span', { class: 'spinner' }),
             el('div', { class: 'stack', style: 'gap:0.15rem' }, [
-                el('strong', {}, `Analyzing YouTube video directly with Gemini (${activeModel})…`),
-                el('span', { class: 'faint' }, `Passing "${ytUrl}" directly to Gemini via Part.from_uri and summarizing the actual spoken and visual lecture content…`),
+                el('strong', {}, `Analyzing YouTube lecture with Gemini (${activeModel} · ${modeMeta.label})…`),
+                el('span', { class: 'faint' }, 'Generating executive TL;DR, detailed narrative walkthrough, key concepts, study questions, and lecturer delivery insights…'),
             ]),
         ]));
         processingHost.classList.remove('hidden');
@@ -234,6 +390,7 @@ export function renderVideoSummaryTab(container, ctx) {
                     youtube_url: ytUrl,
                     lesson_tag: lessonSelect.value,
                     lecturer_notes: notesInput.value.trim(),
+                    video_mode: activeVideoMode,
                 }, getLecturerGeminiHeaders());
                 toast('YouTube lecture summary generated!', 'success');
                 youtubeUrlInput.value = '';
@@ -241,47 +398,6 @@ export function renderVideoSummaryTab(container, ctx) {
                 await loadSummaries();
             } finally {
                 processingHost.classList.add('hidden');
-            }
-        });
-    });
-
-    uploadMp4Btn.addEventListener('click', () => mp4FileInput.click());
-    mp4FileInput.addEventListener('change', () => {
-        const file = mp4FileInput.files[0];
-        if (!file) return;
-        if (!file.name.toLowerCase().endsWith('.mp4')) {
-            toast('Unsupported video format. Only MP4 (.mp4) lecture video files are accepted.', 'error');
-            mp4FileInput.value = '';
-            return;
-        }
-        if (file.size > 20 * 1024 * 1024) {
-            toast(`MP4 file (${(file.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 20 MB upload limit. Please use the YouTube URL option for longer recordings.`, 'error', 4200);
-            mp4FileInput.value = '';
-            return;
-        }
-        const form = new FormData();
-        form.append('file', file);
-        const activeModel = getSelectedModelId();
-
-        mount(processingHost, el('div', { class: 'processing-pulse' }, [
-            el('span', { class: 'spinner' }),
-            el('div', { class: 'stack', style: 'gap:0.15rem' }, [
-                el('strong', {}, `Uploading & analyzing video with Gemini (${activeModel})…`),
-                el('span', { class: 'faint' }, `Uploading "${file.name}" (${(file.size / (1024 * 1024)).toFixed(1)} MB) via the Gemini Files API, waiting for ACTIVE processing state, and summarizing the actual lecture content…`),
-            ]),
-        ]));
-        processingHost.classList.remove('hidden');
-
-        withLoading(uploadMp4Btn, async () => {
-            try {
-                const url = `/api/video/summarize?lesson_tag=${encodeURIComponent(lessonSelect.value)}&lecturer_notes=${encodeURIComponent(notesInput.value.trim())}`;
-                await api.upload(url, form, getLecturerGeminiHeaders());
-                toast(`MP4 lecture summary generated for "${file.name}"!`, 'success');
-                notesInput.value = '';
-                await loadSummaries();
-            } finally {
-                processingHost.classList.add('hidden');
-                mp4FileInput.value = '';
             }
         });
     });
@@ -297,18 +413,17 @@ export function renderVideoSummaryTab(container, ctx) {
         el('div', { class: 'card stack' }, [
             el('div', { class: 'card-title' }, [
                 el('span', { html: icon('video') }),
-                el('h2', {}, 'ML Lecture Video Summarizer (YouTube URL or MP4 Upload <= 20 MB)'),
+                el('h2', {}, 'AI Lecture Video Summarizer'),
             ]),
-            el('p', { class: 'muted' }, 'Paste a public YouTube lecture URL (analyzed directly by Gemini via Part.from_uri with zero local download) OR upload an MP4 (.mp4) clip up to 20 MB via the Gemini Files API.'),
+            el('p', { class: 'muted' }, 'Paste a public YouTube lecture URL to generate an instant structured academic summary with Gemini.'),
             el('div', { class: 'grid', style: 'grid-template-columns:1fr 2fr' }, [
                 el('label', { class: 'field' }, ['Lesson Tag', lessonSelect]),
                 el('label', { class: 'field' }, ['Lecture Focus / Context Notes', notesInput]),
             ]),
             el('div', { class: 'row' }, [
                 youtubeUrlInput,
+                modePillsBar,
                 analyzeYoutubeBtn,
-                uploadMp4Btn,
-                mp4FileInput,
             ]),
             processingHost,
         ]),
@@ -463,7 +578,7 @@ export function renderHomeworkTab(container, ctx) {
                 studentKeyChip.textContent = `Browser key ready (${maskByokKey(k)}) · Model: ${m}`;
             } else {
                 studentKeyChip.className = 'chip warn';
-                studentKeyChip.textContent = 'Enter your Gemini API Key to enable AI homework review';
+                studentKeyChip.textContent = `No API key saved · Model: ${m}`;
             }
         };
         refreshStudentByokChip();

@@ -1016,7 +1016,12 @@ function renderRosterAndHeadcountTab(container, ctx) {
             if (live) activeLessonId = live.lesson_id;
             mount(lessonSelect, ids.map((id) => {
                 const match = sessions.find((s) => s.lesson_id === id);
-                const label = match ? `${match.lesson_title} (${id})${match.active ? ' · LIVE' : ''}` : id;
+                const title = match?.lesson_title;
+                const label = match
+                    ? (title && title !== id
+                        ? `${title} (${id})${match.active ? ' · LIVE' : ''}`
+                        : `${id}${match.active ? ' · LIVE' : ''}`)
+                    : id;
                 return el('option', { value: id, selected: id === activeLessonId }, label);
             }));
             await loadLessonReport(activeLessonId);
@@ -1067,7 +1072,7 @@ function renderRosterAndHeadcountTab(container, ctx) {
         el('div', { class: 'row' }, [
             el('div', { class: 'card-title', style: 'margin-bottom:0' }, [
                 el('span', { html: icon('grid') }),
-                el('h2', {}, 'Lesson Scope (Controls Both YOLO Headcount & Roster Below)'),
+                el('h2', {}, 'Lesson Scope'),
             ]),
             el('span', { class: 'spacer' }),
             lessonStatusChip,
@@ -1092,7 +1097,7 @@ function renderRosterAndHeadcountTab(container, ctx) {
                 resetYoloBtn,
                 photoInput,
             ]),
-            el('p', { class: 'muted' }, 'Runs local Ultralytics YOLO person detection, persists the annotated bounding-box photo per lesson, and flags discrepancies (GREEN / ORANGE / RED) against self-registered attendance.'),
+            el('p', { class: 'muted' }, 'Upload a classroom photo to count physical students and compare against self-registered attendance.'),
             yoloResultHost,
         ]),
         el('div', { class: 'card stack' }, [

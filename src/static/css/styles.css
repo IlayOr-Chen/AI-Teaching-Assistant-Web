@@ -179,7 +179,7 @@ h3 { font-size: 1.02rem; }
 .btn.loading .btn-label { opacity: 0.85; }
 
 .spinner {
-    width: 16px; height: 16px; border-radius: 50%;
+    flex: none; width: 16px; height: 16px; border-radius: 50%;
     border: 2px solid rgba(255, 255, 255, 0.35); border-top-color: currentColor; animation: spin 0.7s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -452,6 +452,50 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(124, 14
 .delivery-grid { display: grid; grid-template-columns: 1fr; gap: 0.75rem; }
 @media (min-width: 720px) { .delivery-grid { grid-template-columns: repeat(3, 1fr); } }
 .processing-pulse { display: flex; align-items: center; gap: 0.85rem; padding: 1rem 1.2rem; border-radius: var(--radius-sm); border: 1px solid rgba(124, 140, 255, 0.45); background: rgba(124, 140, 255, 0.1); animation: fade-up 0.35s var(--ease) both; }
+.overview-box {
+    background: rgba(8, 12, 28, 0.56);
+    border: 1px solid rgba(124, 140, 255, 0.28);
+    border-radius: var(--radius-sm);
+    padding: 1.05rem 1.2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+}
+.overview-paragraph {
+    color: var(--text);
+    font-size: 0.94rem;
+    line-height: 1.65;
+}
+.concepts-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+}
+@media (min-width: 720px) {
+    .concepts-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+.concept-card {
+    background: rgba(8, 12, 28, 0.52);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent-2);
+    border-radius: var(--radius-sm);
+    padding: 0.8rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+.concept-term {
+    font-weight: 700;
+    color: var(--text);
+    font-size: 0.93rem;
+}
+.concept-explanation {
+    color: var(--text-dim);
+    font-size: 0.88rem;
+    line-height: 1.48;
+}
 
 /* ---------- Interactive Leaflet Geofence Map & Radius Pills ---------- */
 .geofence-map-container {

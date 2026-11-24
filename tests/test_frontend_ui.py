@@ -99,7 +99,7 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
             "label: 'Homework'",
             "Select Existing Lesson or Open a New Lesson",
             "Switch / Open Another Lesson",
-            "Lesson Scope (Controls Both YOLO Headcount & Roster Below)",
+            "Lesson Scope",
             "Upload classroom photo",
             "Reset YOLO",
             "Sync from Course Excel",
@@ -125,6 +125,16 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
             "gemini-3.5-flash",
             "gemini-2.5-flash",
             "Clear Key",
+            "No API key configured",
+            "No API key saved",
+            "AI Lecture Video Summarizer",
+            "Fast (Transcript)",
+            "Audio Only",
+            "Full Video (Low FPS)",
+            "Lecture Overview & Walkthrough",
+            "Key Concepts & Definitions",
+            "Quick Review Questions",
+            "Summary copied to clipboard",
             "ta_student_gemini_api_key",
             "ta_student_gemini_model",
             "X-Gemini-Api-Key",
@@ -144,10 +154,12 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
         assert "javascript" in content_type, f"Unexpected content-type for {path}: {content_type}"
         for token in expected_tokens:
             assert token in res.text, f"Expected '{token}' in {path}"
-    # Confirm free-text Gemini model ID replaced rigid __custom__ dropdown
+    # Confirm free-text Gemini model ID replaced rigid __custom__ dropdown and MP4 upload UI was removed
     ai_js = ui_client.get("/static/js/ai_tools.js").text
     assert "__custom__" not in ai_js
     assert "modelSelect" not in ai_js
+    assert "Upload MP4 File" not in ai_js
+    assert "/api/video/summarize?" not in ai_js
     # Confirm public lecturer self-registration UI, email placeholder leak, and demo media assets were removed
     lec_js = ui_client.get("/static/js/lecturer.js").text
     assert "Create lecturer account" not in lec_js
