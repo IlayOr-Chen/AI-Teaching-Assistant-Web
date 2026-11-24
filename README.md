@@ -37,12 +37,12 @@ This platform provides a self-contained, mobile-first **Web-Based AI Teaching As
 * **Feature 3 — On-the-Spot KISS Polls (`PollService`):**
   * Persisted under `/polls` with instant multiple-choice creation (`2..8` options), single-vote-per-student enforcement, live open/close controls, and animated live percentage bars.
 * **Feature 4 — ML Lecture Video Summary (`GeminiClient` & `VideoSummarizer`):**
-  * Lecturer Settings panel (`/settings/gemini`) to enter/update a Gemini API Key (masked in UI) and configure the Gemini Model ID (defaulting to `gemini-2.5-flash-lite` while allowing custom IDs such as `gemini-3.5-flash-lite`).
-  * Strict `.mp4`-only validation (`video/mp4`), live processing indicator, and concise structured output (**Executive Summary**, **Key Topics**, **Core Takeaways**, **Action Items**, and **Lecturer Delivery Insights** on `Pacing`, `Clarity`, and `Audio Quality`).
+  * Lecturer Settings panel (`/settings/gemini`) to enter/update a Gemini API Key (masked in UI) and select a valid Gemini Model ID (`gemini-2.5-flash` default, `gemini-2.5-flash-lite`, `gemini-2.5-pro`, `gemini-2.0-flash`, or custom model ID).
+  * Strict `.mp4`-only validation (`video/mp4`), full video upload via the official **Gemini Files API** (`client.files.upload` with ASCII-safe temp file handling for Hebrew filenames and status polling until `ACTIVE`), real error surfacing when `GEMINI_API_KEY` is missing or fails (zero fake fallbacks), and structured output (**Executive Summary**, **Key Topics**, **Core Takeaways**, **Action Items**, and **Lecturer Delivery Insights** on `Pacing`, `Clarity`, and `Audio Quality`).
 * **Feature 5 — Deep Homework Review & Peer Comparison (`HomeworkReviewer`):**
-  * Strict `.pdf`-only upload + `pypdf` text extraction (`/homework_assignments`).
-  * **Gated Release Rule:** Students can upload/replace their PDF while submissions are open, but AI reviews and peer comparisons remain strictly locked (`review_released=False`) until the deadline passes OR the Lecturer clicks **"End Submission Now"**.
-  * **Polished Two-Column Review Layout:** (1) **Concise Review & Summary Card** and (2) **Dedicated Peer Comparison Column** across all submitted PDFs — plus the explicit **First-Submission Edge Case** notice when `total_submissions == 1`.
+  * **Multi-Format File Upload + Public GitHub Repository URL:** Accepts `.pdf`, `.docx`, `.txt`, `.md`, `.zip`, and source-code files (`.py`, `.java`, `.c`, `.cpp`, `.h`, `.js`, `.ts`, `.html`, `.css`, `.json`), OR a **Public GitHub Repository URL** (`https://github.com/owner/repo`, downloaded over HTTPS zipball without requiring a local `git` binary, extracting `README.md` and source files while ignoring `node_modules/`, `venv/`, `.git/`, `__pycache__/`, and binaries).
+  * **Gated Release Rule:** Students can submit/replace their work while submissions are open, but AI reviews and peer comparisons remain strictly locked (`review_released=False`) until the deadline passes OR the Lecturer clicks **"End Submission Now"**.
+  * **Polished Two-Column Review Layout:** (1) **Concise Review & Summary Card** and (2) **Dedicated Peer Comparison Column** across all submissions — plus the explicit **First-Submission Edge Case** notice when `total_submissions == 1`.
 
 ### Out-of-Scope Constraints
 * No integration with Moodle, external Zoom REST APIs, university SSO portals, or facial recognition biometrics.

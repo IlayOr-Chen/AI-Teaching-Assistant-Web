@@ -1,9 +1,9 @@
 /**
- * Purpose: Frontend UI module for Feature 4 (ML Lecture Video Summary — MP4 Only + Gemini
- *          with Lecturer API key & model settings) and Feature 5 (Deep Homework Review &
- *          Peer Comparison — PDF Only + Gemini + Gated Release Rule + First-Submission notice).
+ * Purpose: Frontend UI module for Feature 4 (ML Lecture Video Summary — MP4 Only + Gemini Files API
+ *          with Lecturer API key & valid model settings) and Feature 5 (Deep Homework Review &
+ *          Peer Comparison — Multi-Format Files & Public Git Repo URLs + Gemini + Gated Release Rule).
  * Inputs:  DOM container and `{ user, role }` context.
- * Outputs: Interactive Video Summary and Homework Review & Peer Comparison tabs.
+ * Outputs: Interactive Video AI and Homework tabs.
  */
 
 import { api } from './api.js';
@@ -14,8 +14,21 @@ import {
 
 const LESSON_TAGS = ['Lesson 1', 'Lesson 2', 'Lesson 3', 'Lesson 4', 'Lesson 5', 'General'];
 
+const VALID_GEMINI_MODELS = [
+    'gemini-2.5-flash',
+    'gemini-2.5-flash-lite',
+    'gemini-2.5-pro',
+    'gemini-2.0-flash',
+];
+
+const HOMEWORK_FILE_ACCEPT = [
+    '.pdf', '.docx', '.txt', '.md', '.zip',
+    '.py', '.java', '.c', '.cpp', '.h',
+    '.js', '.ts', '.html', '.css', '.json',
+].join(',');
+
 /* ================================================================== */
-/* Feature 4 — ML Lecture Video Summary (MP4 Only + Gemini Settings)  */
+/* Feature 4 — ML Lecture Video Summary (MP4 Only + Gemini Files API) */
 /* ================================================================== */
 
 /**
@@ -30,24 +43,57 @@ export function renderVideoSummaryTab(container, ctx) {
         placeholder: 'Enter or update your Google Gemini API key…',
         autocomplete: 'off',
     });
-    const modelInput = el('input', {
+
+    const modelSelect = el(
+        'select',
+        { 'aria-label': 'Select Gemini Model' },
+        [
+            ...VALID_GEMINI_MODELS.map((m) => el('option', { value: m, selected: m === 'gemini-2.5-flash' }, m)),
+            el('option', { value: '__custom__' }, 'Custom model ID…'),
+        ],
+    );
+    const customModelInput = el('input', {
         type: 'text',
-        value: 'gemini-2.5-flash-lite',
-        placeholder: 'e.g. gemini-2.5-flash-lite or gemini-3.5-flash-lite',
-        required: true,
+        placeholder: 'Enter custom Gemini model ID (e.g. gemini-2.5-flash)',
+        class: 'hidden',
     });
+
+    modelSelect.addEventListener('change', () => {
+        const isCustom = modelSelect.value === '__custom__';
+        customModelInput.classList.toggle('hidden', !isCustom);
+        if (isCustom) customModelInput.focus();
+    });
+
+    const getSelectedModelId = () => (
+        modelSelect.value === '__custom__'
+            ? (customModelInput.value.trim() || 'gemini-2.5-flash')
+            : modelSelect.value
+    );
+
+    const setSelectedModelId = (modelId) => {
+        const clean = (modelId || 'gemini-2.5-flash').trim();
+        if (VALID_GEMINI_MODELS.includes(clean)) {
+            modelSelect.value = clean;
+            customModelInput.classList.add('hidden');
+        } else {
+            modelSelect.value = '__custom__';
+            customModelInput.value = clean;
+            customModelInput.classList.remove('hidden');
+        }
+    };
+
     const saveSettingsBtn = button('Save Gemini Settings', { cls: 'primary sm', type: 'submit', iconName: 'sparkles' });
 
     const loadSettings = async () => {
         try {
             const s = await api.get('/api/settings/gemini');
-            modelInput.value = s.model_id || 'gemini-2.5-flash-lite';
+            setSelectedModelId(s.model_id || 'gemini-2.5-flash');
             if (s.has_api_key) {
                 settingsStatusChip.className = 'chip ok';
                 settingsStatusChip.textContent = `Key active (${s.masked_api_key}) · Model: ${s.model_id}`;
             } else {
-                settingsStatusChip.className = 'chip warn';
-                settingsStatusChip.textContent = `No external key set (Structured Analyzer active) · Model: ${s.model_id}`;
+                settingsStatusChip.className = 'chip danger';
+                settingsStatusChip.textContent = 'GEMINI_API_KEY missing — enter key above or in .env';
             }
         } catch (err) {
             toast(err.message, 'error');
@@ -57,18 +103,14 @@ export function renderVideoSummaryTab(container, ctx) {
     const settingsForm = el('form', { class: 'stack' }, [
         el('div', { class: 'grid grid-2' }, [
             el('label', { class: 'field' }, ['Gemini API Key (stored in Firebase RTDB /settings/gemini)', apiKeyInput]),
-            el('label', { class: 'field' }, ['Gemini Model ID (configurable)', modelInput]),
+            el('label', { class: 'field' }, ['Gemini Model ID', modelSelect, customModelInput]),
         ]),
         el('div', { class: 'row' }, [
             saveSettingsBtn,
-            button('Preset: gemini-2.5-flash-lite', {
+            ...VALID_GEMINI_MODELS.map((m) => button(m, {
                 cls: 'sm ghost',
-                onclick: () => { modelInput.value = 'gemini-2.5-flash-lite'; },
-            }),
-            button('Preset: gemini-3.5-flash-lite', {
-                cls: 'sm ghost',
-                onclick: () => { modelInput.value = 'gemini-3.5-flash-lite'; },
-            }),
+                onclick: () => setSelectedModelId(m),
+            })),
             el('span', { class: 'spacer' }),
             settingsStatusChip,
         ]),
@@ -77,7 +119,7 @@ export function renderVideoSummaryTab(container, ctx) {
     settingsForm.addEventListener('submit', (e) => {
         e.preventDefault();
         withLoading(saveSettingsBtn, async () => {
-            const payload = { model_id: modelInput.value.trim() };
+            const payload = { model_id: getSelectedModelId() };
             if (apiKeyInput.value.trim()) payload.api_key = apiKeyInput.value.trim();
             await api.put('/api/settings/gemini', payload);
             apiKeyInput.value = '';
@@ -90,7 +132,7 @@ export function renderVideoSummaryTab(container, ctx) {
     const lessonSelect = el('select', {}, LESSON_TAGS.map((t) => el('option', { value: t }, t)));
     const notesInput = el('input', {
         type: 'text',
-        placeholder: 'Optional topic context (e.g. Ex2 KISS OOP & Design Patterns)…',
+        placeholder: 'Optional lecture context notes…',
     });
     const mp4FileInput = el('input', { type: 'file', accept: '.mp4,video/mp4', class: 'hidden' });
     const uploadMp4Btn = button('Select & Analyze MP4 Video (.mp4 only)', { cls: 'primary', iconName: 'video' });
@@ -102,7 +144,7 @@ export function renderVideoSummaryTab(container, ctx) {
         return el('div', { class: 'card stack' }, [
             el('div', { class: 'row' }, [
                 el('span', { class: 'chip ok' }, s.lesson_tag || 'Lesson 1'),
-                el('strong', {}, s.filename),
+                el('strong', { dir: 'auto' }, s.filename),
                 el('span', { class: 'faint' }, `${s.file_size_kb} KB · Model: ${s.model_used} · ${formatTime(s.created_at)}`),
                 el('span', { class: 'spacer' }),
                 el('span', { class: 'chip ok' }, `Delivery: ${del.overall_rating || 'Excellent'}`),
@@ -137,7 +179,7 @@ export function renderVideoSummaryTab(container, ctx) {
             const { summaries } = await api.get('/api/video/summaries');
             if (!summaries.length) {
                 mount(summariesHost, el('div', { class: 'card empty' },
-                    'No lecture video summaries yet. Upload an MP4 (.mp4) recording above for an instant structured teaching & delivery summary.'));
+                    'No lecture video summaries yet. Upload an MP4 (.mp4) recording above for an accurate Gemini teaching & delivery summary.'));
                 return;
             }
             mount(summariesHost, summaries.map(renderSummaryCard));
@@ -157,12 +199,13 @@ export function renderVideoSummaryTab(container, ctx) {
         }
         const form = new FormData();
         form.append('file', file);
+        const activeModel = getSelectedModelId();
 
         mount(processingHost, el('div', { class: 'processing-pulse' }, [
             el('span', { class: 'spinner' }),
             el('div', { class: 'stack', style: 'gap:0.15rem' }, [
-                el('strong', {}, `Analyzing "${file.name}" via Gemini (${modelInput.value})…`),
-                el('span', { class: 'faint' }, 'Extracting Key Topics, Core Takeaways, Action Items, and Lecturer Delivery Insights (pacing, clarity, audio quality)…'),
+                el('strong', {}, `Uploading & analyzing video with Gemini (${activeModel})…`),
+                el('span', { class: 'faint' }, `Uploading "${file.name}" (${(file.size / (1024 * 1024)).toFixed(1)} MB) via the Gemini Files API, waiting for ACTIVE processing state, and summarizing the actual lecture content…`),
             ]),
         ]));
         processingHost.classList.remove('hidden');
@@ -192,9 +235,9 @@ export function renderVideoSummaryTab(container, ctx) {
         el('div', { class: 'card stack' }, [
             el('div', { class: 'card-title' }, [
                 el('span', { html: icon('video') }),
-                el('h2', {}, 'ML Lecture Video Summarizer (MP4 Only)'),
+                el('h2', {}, 'ML Lecture Video Summarizer (MP4 Only · Gemini Files API)'),
             ]),
-            el('p', { class: 'muted' }, 'Upload an MP4 (.mp4) lecture recording to generate a concise, structured teaching summary and delivery analysis — improving directly on verbose raw Zoom auto-summaries.'),
+            el('p', { class: 'muted' }, 'Uploads MP4 (.mp4) lecture recordings (including large 100+ MB files and Hebrew filenames) via the official Gemini Files API to summarize the actual spoken and visual lecture content.'),
             el('div', { class: 'grid', style: 'grid-template-columns:1fr 2fr' }, [
                 el('label', { class: 'field' }, ['Lesson Tag', lessonSelect]),
                 el('label', { class: 'field' }, ['Lecture Focus / Context Notes', notesInput]),
@@ -210,7 +253,7 @@ export function renderVideoSummaryTab(container, ctx) {
 }
 
 /* ================================================================== */
-/* Feature 5 — Deep Homework Review & Peer Comparison (PDF Only)      */
+/* Feature 5 — Deep Homework Review (Multi-Format Files + Git Repo)   */
 /* ================================================================== */
 
 /**
@@ -255,7 +298,7 @@ function renderReviewAndComparisonColumns(payload) {
         el('div', { class: 'review-col' }, [
             el('div', { class: 'row' }, [
                 el('span', { class: 'chip ok' }, '1 · Concise Review & Summary Card'),
-                el('span', { class: 'faint' }, `${payload.page_count} page(s) · ${payload.word_count} words`),
+                el('span', { class: 'faint' }, `${payload.filename || 'submission'} · ${payload.word_count} words`),
             ]),
             el('p', {}, rev.brief_summary || ''),
             el('h3', {}, 'Strengths'),
@@ -319,46 +362,68 @@ export function renderHomeworkTab(container, ctx) {
                     endNowBtn,
                     el('span', { class: 'faint' }, isReleased
                         ? 'Gate status: UNLOCKED (Students can view AI review & peer comparison)'
-                        : 'Gate status: LOCKED (Students can upload/replace PDF, but reviews are gated until deadline or End Submission Now)'),
+                        : 'Gate status: LOCKED (Students can upload files or submit GitHub repo URLs; reviews remain gated until deadline or End Submission Now)'),
                 ]),
                 studentPills.length
                     ? el('div', { class: 'stack', style: 'gap:0.4rem' }, [
                         el('span', { class: 'faint' }, isReleased
                             ? 'Click a student submission below to inspect their Review Card & Peer Comparison:'
-                            : 'Submitted PDFs (click "End Submission Now" above to release and inspect peer comparisons):'),
+                            : 'Received submissions (click "End Submission Now" above to release and inspect peer comparisons):'),
                         el('div', { class: 'row' }, studentPills),
                     ])
-                    : el('div', { class: 'empty' }, 'No student PDF submissions received yet.'),
+                    : el('div', { class: 'empty' }, 'No student homework submissions received yet.'),
             ]);
         }
 
-        /* ----- Student Controls: Upload PDF (.pdf only) + View Gated/Unlocked Review ----- */
+        /* ----- Student Controls: Multi-Format File Upload OR Public Git Repo URL ----- */
         let studentSection = null;
         if (!isLecturer) {
-            const pdfInput = el('input', { type: 'file', accept: '.pdf,application/pdf', class: 'hidden' });
-            const uploadPdfBtn = button(
-                a.viewer_has_submitted ? 'Replace Submitted PDF (.pdf only)' : 'Upload Homework PDF (.pdf only)',
+            const fileInput = el('input', { type: 'file', accept: HOMEWORK_FILE_ACCEPT, class: 'hidden' });
+            const uploadFileBtn = button(
+                a.viewer_has_submitted
+                    ? 'Replace File (.pdf, .docx, .zip, .txt, .md, code)'
+                    : 'Upload File (.pdf, .docx, .zip, .txt, .md, code)',
                 { cls: 'primary sm', iconName: 'upload' },
             );
-            uploadPdfBtn.disabled = isReleased;
+            uploadFileBtn.disabled = isReleased;
 
-            uploadPdfBtn.addEventListener('click', () => pdfInput.click());
-            pdfInput.addEventListener('change', () => {
-                const file = pdfInput.files[0];
+            uploadFileBtn.addEventListener('click', () => fileInput.click());
+            fileInput.addEventListener('change', () => {
+                const file = fileInput.files[0];
                 if (!file) return;
-                if (!file.name.toLowerCase().endsWith('.pdf')) {
-                    toast('Unsupported homework file format. Only PDF (.pdf) files are accepted.', 'error');
-                    pdfInput.value = '';
-                    return;
-                }
                 const form = new FormData();
                 form.append('file', file);
-                withLoading(uploadPdfBtn, async () => {
+                withLoading(uploadFileBtn, async () => {
                     await api.upload(`/api/homework/assignments/${encodeURIComponent(a.assignment_id)}/submit`, form);
-                    toast(`PDF "${file.name}" submitted!`, 'success');
+                    toast(`Homework file "${file.name}" submitted!`, 'success');
                     await loadAssignments();
                 });
-                pdfInput.value = '';
+                fileInput.value = '';
+            });
+
+            const repoUrlInput = el('input', {
+                type: 'url',
+                placeholder: 'https://github.com/owner/repo (Public GitHub Repository URL)',
+                style: 'min-width:260px;flex:1',
+            });
+            repoUrlInput.disabled = isReleased;
+            const submitRepoBtn = button('Submit Public Git Repo URL', { cls: 'sm', iconName: 'sparkles' });
+            submitRepoBtn.disabled = isReleased;
+
+            submitRepoBtn.addEventListener('click', () => {
+                const urlVal = repoUrlInput.value.trim();
+                if (!urlVal) {
+                    toast('Enter a public GitHub repository URL (e.g. https://github.com/owner/repo).', 'warning');
+                    return;
+                }
+                withLoading(submitRepoBtn, async () => {
+                    await api.post(`/api/homework/assignments/${encodeURIComponent(a.assignment_id)}/submit-repo`, {
+                        repo_url: urlVal,
+                    });
+                    repoUrlInput.value = '';
+                    toast('Public Git repository submitted and analyzed!', 'success');
+                    await loadAssignments();
+                });
             });
 
             const loadMyReview = async () => {
@@ -372,12 +437,23 @@ export function renderHomeworkTab(container, ctx) {
             };
             loadMyReview();
 
-            studentSection = el('div', { class: 'row' }, [
-                !isReleased ? uploadPdfBtn : null,
-                pdfInput,
-                a.viewer_has_submitted
-                    ? el('span', { class: 'chip ok' }, [el('span', { html: icon('check') }), 'PDF Submitted'])
-                    : (isReleased ? el('span', { class: 'chip danger' }, 'Submissions Closed') : null),
+            studentSection = el('div', { class: 'stack', style: 'gap:0.65rem' }, [
+                !isReleased
+                    ? el('div', { class: 'row' }, [
+                        uploadFileBtn,
+                        fileInput,
+                        repoUrlInput,
+                        submitRepoBtn,
+                    ])
+                    : null,
+                el('div', { class: 'row' }, [
+                    a.viewer_has_submitted
+                        ? el('span', { class: 'chip ok' }, [el('span', { html: icon('check') }), 'Homework Submitted'])
+                        : (isReleased ? el('span', { class: 'chip danger' }, 'Submissions Closed') : null),
+                    !isReleased
+                        ? el('span', { class: 'faint' }, 'Supported: .pdf, .docx, .zip, .txt, .md, .py, .java, .c, .cpp, .h, .js, .ts, .html, .css, .json, or a Public GitHub URL.')
+                        : null,
+                ]),
             ]);
         }
 
@@ -388,7 +464,7 @@ export function renderHomeworkTab(container, ctx) {
                     isReleased ? 'REVIEWS UNLOCKED' : 'SUBMISSIONS OPEN (REVIEWS GATED)',
                 ]),
                 el('span', { class: 'chip' }, a.lesson_tag || 'Lesson 1'),
-                el('span', { class: 'faint' }, `Deadline: ${deadlineStr} · ${a.submission_count} PDF submission(s)`),
+                el('span', { class: 'faint' }, `Deadline: ${deadlineStr} · ${a.submission_count} submission(s)`),
             ]),
             el('h2', { dir: 'auto' }, a.title),
             a.description ? el('p', { class: 'muted', dir: 'auto' }, a.description) : null,
@@ -404,7 +480,7 @@ export function renderHomeworkTab(container, ctx) {
             if (!assignments.length) {
                 mount(assignmentsHost, el('div', { class: 'card empty' },
                     isLecturer
-                        ? 'No homework assignments created yet. Create a PDF assignment above!'
+                        ? 'No homework assignments created yet. Create an assignment above!'
                         : 'No homework assignments posted yet.'));
                 return;
             }
@@ -419,12 +495,12 @@ export function renderHomeworkTab(container, ctx) {
     if (isLecturer) {
         const titleInput = el('input', {
             type: 'text',
-            placeholder: 'e.g. Ex2: Software Engineering Architecture & Use Cases Report',
+            placeholder: 'e.g. Ex2: Software Engineering Architecture & Repository Submission',
             required: true,
         });
         const descInput = el('input', {
             type: 'text',
-            placeholder: 'Instructions / Grading Focus (e.g. Upload your PDF report covering Happy & Edge Cases)…',
+            placeholder: 'Instructions / Grading Focus (accepts PDF, DOCX, ZIP, code files, or Public GitHub Repo URL)…',
         });
         const tagSelect = el('select', {}, LESSON_TAGS.map((t) => el('option', { value: t }, t)));
         const deadlineHoursInput = el('input', {
@@ -467,9 +543,9 @@ export function renderHomeworkTab(container, ctx) {
         creatorCard = el('div', { class: 'card stack' }, [
             el('div', { class: 'card-title' }, [
                 el('span', { html: icon('file') }),
-                el('h2', {}, 'Create Gated PDF Homework Assignment'),
+                el('h2', {}, 'Create Gated Homework Assignment (Files & Public Git Repo URLs)'),
             ]),
-            el('p', { class: 'muted' }, 'Students upload PDF files only. AI feedback and peer comparisons remain strictly gated until the deadline passes or you click "End Submission Now".'),
+            el('p', { class: 'muted' }, 'Students can upload files (.pdf, .docx, .zip, .txt, .md, source code) or submit a Public GitHub Repository URL. AI feedback and peer comparisons remain strictly gated until the deadline passes or you click "End Submission Now".'),
             form,
         ]);
     }

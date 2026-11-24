@@ -35,7 +35,7 @@ export function renderLecturerAuth(root, { onAuthenticated, onBack }) {
 
     const submit = button('Sign in', { cls: 'primary lg block', type: 'submit' });
     const form = el('form', { class: 'stack', autocomplete: 'on' }, [
-        field('Email', 'email', 'email', 'adminL@gmail.com', 'email'),
+        field('Email', 'email', 'email', 'Enter your email', 'email'),
         field('Password', 'password', 'password', 'Your password', 'current-password'),
         submit,
     ]);
@@ -94,12 +94,12 @@ export function renderLecturerDashboard(root, ctx) {
 function buildLecturerTabs(ctx) {
     return [
         { id: 'overview', label: 'Overview', icon: 'grid', render: (c) => renderOverviewTab(c, ctx) },
-        { id: 'attendance', label: 'Live attendance', icon: 'qr', render: (c) => renderLiveAttendanceTab(c, ctx) },
-        { id: 'roster', label: 'Roster & YOLO Headcount', icon: 'table', render: (c) => renderRosterAndHeadcountTab(c, ctx) },
-        { id: 'polls', label: 'Live Polls', icon: 'poll', render: (c) => renderPollsTab(c, { ...ctx, role: 'lecturer' }) },
-        { id: 'comments', label: 'Comments & Suggestions', icon: 'message', render: (c) => renderCommentsTab(c, { ...ctx, role: 'lecturer' }) },
-        { id: 'video', label: 'MP4 Lecture Summary', icon: 'video', render: (c) => renderVideoSummaryTab(c, { ...ctx, role: 'lecturer' }) },
-        { id: 'homework', label: 'PDF Homework Review', icon: 'file', render: (c) => renderHomeworkTab(c, { ...ctx, role: 'lecturer' }) },
+        { id: 'attendance', label: 'Attendance', icon: 'qr', render: (c) => renderLiveAttendanceTab(c, ctx) },
+        { id: 'roster', label: 'Roster', icon: 'table', render: (c) => renderRosterAndHeadcountTab(c, ctx) },
+        { id: 'polls', label: 'Polls', icon: 'poll', render: (c) => renderPollsTab(c, { ...ctx, role: 'lecturer' }) },
+        { id: 'comments', label: 'Comments', icon: 'message', render: (c) => renderCommentsTab(c, { ...ctx, role: 'lecturer' }) },
+        { id: 'video', label: 'Video AI', icon: 'video', render: (c) => renderVideoSummaryTab(c, { ...ctx, role: 'lecturer' }) },
+        { id: 'homework', label: 'Homework', icon: 'file', render: (c) => renderHomeworkTab(c, { ...ctx, role: 'lecturer' }) },
     ];
 }
 
@@ -255,7 +255,7 @@ function renderLiveAttendanceTab(container, ctx) {
         return btn;
     };
 
-    const showSetup = async () => {
+    const showSetup = async ({ forceSetup = false } = {}) => {
         if (stopActive) { stopActive(); stopActive = null; }
         if (stopSetupMap) { stopSetupMap(); stopSetupMap = null; }
         mount(container, el('div', { class: 'card' }, el('span', { class: 'spinner' })));
@@ -268,22 +268,44 @@ function renderLiveAttendanceTab(container, ctx) {
         if (disposed) return;
 
         const live = sessions.filter((s) => s.active).sort((a, b) => b.started_at - a.started_at)[0];
-        if (live) { showActive(live, null); return; }
+        if (live && !forceSetup) { showActive(live, null); return; }
 
         const highest = sessions.reduce((max, s) => {
             const m = /^lesson_(\d+)$/.exec(s.lesson_id || '');
             return m ? Math.max(max, Number(m[1])) : max;
         }, 0);
+        const suggestedNextNo = highest + 1;
 
-        const lessonNo = el('input', { type: 'number', min: 1, max: 99, value: highest + 1, required: true, name: 'lesson_no' });
+        let selectedLat = 32.104400;
+        let selectedLng = 35.207800;
+        let selectedRadius = 100;
+
+        const lessonModeSelect = el(
+            'select',
+            { name: 'lesson_selector', 'aria-label': 'Select existing lesson or create new lesson' },
+            [
+                el('option', { value: '__new__', selected: true }, `+ Create & Open New Lesson (Lesson ${suggestedNextNo})`),
+                ...sessions.map((s) => el(
+                    'option',
+                    { value: s.lesson_id },
+                    `${s.lesson_title || s.lesson_id} (${s.lesson_id})${s.active ? ' · LIVE' : ' · Reopen / Resume'}`,
+                )),
+            ],
+        );
+
+        const lessonNo = el('input', { type: 'number', min: 1, max: 99, value: suggestedNextNo, required: true, name: 'lesson_no' });
         const title = el('input', { type: 'text', maxlength: 80, placeholder: 'Optional, e.g. Design Patterns', name: 'title' });
-        const radiusInput = el('input', { type: 'number', min: 30, max: 500, value: 100, required: true, name: 'geofence_radius_meters' });
-        const latInput = el('input', { type: 'text', value: '32.104400', placeholder: 'e.g. 32.104400', name: 'classroom_lat' });
-        const lngInput = el('input', { type: 'text', value: '35.207800', placeholder: 'e.g. 35.207800', name: 'classroom_lng' });
         const enforce = el('input', { type: 'checkbox', checked: true, name: 'enforce_geofence' });
         const detectGpsBtn = button('Use My Current Location', { cls: 'sm primary', iconName: 'wifi' });
         const presetGpsBtn = button('Ariel Campus preset', { cls: 'sm ghost' });
         const resetCooldownSetupBtn = buildResetCooldownsButton('sm');
+        const resumeLiveBtn = live
+            ? button(`Resume Live (${live.lesson_title || live.lesson_id})`, {
+                cls: 'sm',
+                iconName: 'qr',
+                onclick: () => showActive(live, null),
+            })
+            : null;
         const start = button('Start attendance session', { cls: 'primary lg block', type: 'submit', iconName: 'play' });
 
         /* ----- Radius selector pills (30m / 50m / 100m) ----- */
@@ -291,6 +313,16 @@ function renderLiveAttendanceTab(container, ctx) {
         let mapInstance = null;
         let mapMarker = null;
         let mapCircle = null;
+
+        const mapCoordsCaption = el(
+            'p',
+            { class: 'faint' },
+            `Selected classroom pin: ${selectedLat.toFixed(6)}, ${selectedLng.toFixed(6)} · Geofence radius: ${selectedRadius}m (click map or drag pin to move)`,
+        );
+
+        const updateCoordsCaption = () => {
+            mapCoordsCaption.textContent = `Selected classroom pin: ${selectedLat.toFixed(6)}, ${selectedLng.toFixed(6)} · Geofence radius: ${selectedRadius}m (click map or drag pin to move)`;
+        };
 
         const pillButtons = RADIUS_OPTIONS.map((r) => {
             const pill = el('button', {
@@ -303,49 +335,60 @@ function renderLiveAttendanceTab(container, ctx) {
         });
 
         const setRadiusMeters = (r) => {
-            const radiusVal = Math.max(30, Math.min(500, Number(r) || 100));
-            radiusInput.value = String(radiusVal);
+            selectedRadius = Math.max(30, Math.min(500, Number(r) || 100));
             for (const pill of pillButtons) {
-                pill.classList.toggle('active', Number(pill.dataset.radius) === radiusVal);
+                pill.classList.toggle('active', Number(pill.dataset.radius) === selectedRadius);
             }
             if (mapCircle) {
-                mapCircle.setRadius(radiusVal);
+                mapCircle.setRadius(selectedRadius);
             }
+            updateCoordsCaption();
         };
 
         const setPinCoordinates = (lat, lng, recenter = true) => {
             const safeLat = Number(lat);
             const safeLng = Number(lng);
             if (!Number.isFinite(safeLat) || !Number.isFinite(safeLng)) return;
-            latInput.value = safeLat.toFixed(6);
-            lngInput.value = safeLng.toFixed(6);
-            if (mapMarker) mapMarker.setLatLng([safeLat, safeLng]);
-            if (mapCircle) mapCircle.setLatLng([safeLat, safeLng]);
+            selectedLat = Number(safeLat.toFixed(6));
+            selectedLng = Number(safeLng.toFixed(6));
+            if (mapMarker) mapMarker.setLatLng([selectedLat, selectedLng]);
+            if (mapCircle) mapCircle.setLatLng([selectedLat, selectedLng]);
             if (mapInstance && recenter) {
-                mapInstance.setView([safeLat, safeLng], Math.max(mapInstance.getZoom(), 17));
+                mapInstance.setView([selectedLat, selectedLng], Math.max(mapInstance.getZoom(), 17));
             }
+            updateCoordsCaption();
         };
 
-        radiusInput.addEventListener('input', () => setRadiusMeters(Number(radiusInput.value)));
-        const onManualCoordInput = () => {
-            const parsedLat = Number(latInput.value.trim());
-            const parsedLng = Number(lngInput.value.trim());
-            if (Number.isFinite(parsedLat) && Number.isFinite(parsedLng)) {
-                setPinCoordinates(parsedLat, parsedLng, true);
+        lessonModeSelect.addEventListener('change', () => {
+            const val = lessonModeSelect.value;
+            if (val === '__new__') {
+                lessonNo.value = String(suggestedNextNo);
+                title.value = '';
+                return;
             }
-        };
-        latInput.addEventListener('change', onManualCoordInput);
-        lngInput.addEventListener('change', onManualCoordInput);
+            const chosen = sessions.find((s) => s.lesson_id === val);
+            if (!chosen) return;
+            const m = /^lesson_(\d+)$/.exec(chosen.lesson_id || '');
+            if (m) lessonNo.value = m[1];
+            title.value = chosen.lesson_title || '';
+            if (chosen.classroom_lat !== null && chosen.classroom_lat !== undefined && chosen.classroom_lng !== null && chosen.classroom_lng !== undefined) {
+                setPinCoordinates(chosen.classroom_lat, chosen.classroom_lng, true);
+            }
+            if (chosen.geofence_radius_meters) {
+                setRadiusMeters(chosen.geofence_radius_meters);
+            }
+            enforce.checked = chosen.enforce_geofence !== false;
+        });
 
         detectGpsBtn.addEventListener('click', () => {
             if (!navigator.geolocation) {
-                toast('Browser Geolocation is not available; click on the map or enter coordinates manually.', 'warning');
+                toast('Browser Geolocation is not available; click on the map to position the classroom pin.', 'warning');
                 return;
             }
             navigator.geolocation.getCurrentPosition(
                 (pos) => {
                     setPinCoordinates(pos.coords.latitude, pos.coords.longitude, true);
-                    toast(`Captured classroom GPS (${latInput.value}, ${lngInput.value}).`, 'success');
+                    toast(`Captured classroom GPS (${selectedLat.toFixed(6)}, ${selectedLng.toFixed(6)}).`, 'success');
                 },
                 (err) => {
                     toast(`Could not read browser GPS (${err.message}). Click on the map to place the pin manually.`, 'warning');
@@ -365,14 +408,12 @@ function renderLiveAttendanceTab(container, ctx) {
         });
 
         const form = el('form', { class: 'stack' }, [
+            sessions.length
+                ? el('label', { class: 'field' }, ['Select Existing Lesson or Open a New Lesson', lessonModeSelect])
+                : null,
             el('div', { class: 'grid', style: 'grid-template-columns:1fr 2fr' }, [
                 el('label', { class: 'field' }, ['Lesson number', lessonNo]),
                 el('label', { class: 'field' }, ['Title', title]),
-            ]),
-            el('div', { class: 'grid', style: 'grid-template-columns:1fr 1fr 1fr' }, [
-                el('label', { class: 'field' }, ['Classroom Lat', latInput]),
-                el('label', { class: 'field' }, ['Classroom Lng', lngInput]),
-                el('label', { class: 'field' }, ['Geofence Radius (m)', radiusInput]),
             ]),
             el('label', { class: 'switch' }, [
                 enforce, el('span', { class: 'track' }),
@@ -388,15 +429,13 @@ function renderLiveAttendanceTab(container, ctx) {
             event.preventDefault();
             const n = Number(lessonNo.value);
             if (!Number.isInteger(n) || n < 1) { toast('Enter a valid lesson number.', 'warning'); return; }
-            const parsedLat = latInput.value.trim() ? Number(latInput.value.trim()) : null;
-            const parsedLng = lngInput.value.trim() ? Number(lngInput.value.trim()) : null;
             withLoading(start, async () => {
                 const session = await api.post('/api/attendance/sessions', {
                     lesson_id: `lesson_${n}`,
                     lesson_title: title.value.trim() || `Lesson ${n}`,
-                    classroom_lat: Number.isFinite(parsedLat) ? parsedLat : null,
-                    classroom_lng: Number.isFinite(parsedLng) ? parsedLng : null,
-                    geofence_radius_meters: Number(radiusInput.value) || 100,
+                    classroom_lat: selectedLat,
+                    classroom_lng: selectedLng,
+                    geofence_radius_meters: selectedRadius,
                     enforce_geofence: enforce.checked,
                 });
                 toast(`${session.lesson_title} is live.`, 'success');
@@ -406,7 +445,14 @@ function renderLiveAttendanceTab(container, ctx) {
 
         mount(container, el('div', { class: 'grid grid-2' }, [
             el('div', { class: 'card stack' }, [
-                el('div', { class: 'card-title' }, [el('span', { html: icon('qr') }), el('h2', {}, 'Start a lesson')]),
+                el('div', { class: 'row' }, [
+                    el('div', { class: 'card-title', style: 'margin-bottom:0' }, [
+                        el('span', { html: icon('qr') }),
+                        el('h2', {}, 'Start or Switch a Lesson'),
+                    ]),
+                    el('span', { class: 'spacer' }),
+                    resumeLiveBtn,
+                ]),
                 form,
                 el('div', { class: 'row', style: 'padding-top:0.4rem;border-top:1px solid var(--border)' }, [
                     resetCooldownSetupBtn,
@@ -421,20 +467,16 @@ function renderLiveAttendanceTab(container, ctx) {
                     el('div', { class: 'radius-pills', role: 'group', 'aria-label': 'Geofence radius selector' }, pillButtons),
                 ]),
                 mapHost,
-                el('p', { class: 'faint' }, 'Click anywhere on the map or drag the pin to position the classroom. The translucent blue/cyan circle previews the exact 30m / 50m / 100m geofence boundary enforced on student phones.'),
-                el('div', { class: 'banner info' }, [el('span', { html: icon('info') }), el('span', {}, 'Browser Geolocation requires HTTPS (provided automatically by Cloudflare Tunnel and Render) or localhost.')]),
+                mapCoordsCaption,
             ]),
         ]));
 
         /* ----- Initialize Leaflet.js + OpenStreetMap Map & Live Circle ----- */
         if (typeof window !== 'undefined' && window.L) {
             const L = window.L;
-            const initialLat = Number(latInput.value) || 32.104400;
-            const initialLng = Number(lngInput.value) || 35.207800;
-            const initialRadius = Number(radiusInput.value) || 100;
 
             mapInstance = L.map(mapHost, {
-                center: [initialLat, initialLng],
+                center: [selectedLat, selectedLng],
                 zoom: 17,
                 zoomControl: true,
             });
@@ -443,9 +485,9 @@ function renderLiveAttendanceTab(container, ctx) {
                 attribution: '&copy; OpenStreetMap contributors',
             }).addTo(mapInstance);
 
-            mapMarker = L.marker([initialLat, initialLng], { draggable: true }).addTo(mapInstance);
-            mapCircle = L.circle([initialLat, initialLng], {
-                radius: initialRadius,
+            mapMarker = L.marker([selectedLat, selectedLng], { draggable: true }).addTo(mapInstance);
+            mapCircle = L.circle([selectedLat, selectedLng], {
+                radius: selectedRadius,
                 color: '#22d3ee',
                 fillColor: '#7c8cff',
                 fillOpacity: 0.22,
@@ -458,8 +500,9 @@ function renderLiveAttendanceTab(container, ctx) {
             mapMarker.on('drag', (e) => {
                 const pos = e.target.getLatLng();
                 if (mapCircle) mapCircle.setLatLng(pos);
-                latInput.value = pos.lat.toFixed(6);
-                lngInput.value = pos.lng.toFixed(6);
+                selectedLat = Number(pos.lat.toFixed(6));
+                selectedLng = Number(pos.lng.toFixed(6));
+                updateCoordsCaption();
             });
             mapMarker.on('dragend', (e) => {
                 const pos = e.target.getLatLng();
@@ -629,6 +672,14 @@ function renderLiveAttendanceTab(container, ctx) {
             }
         });
 
+        const switchLessonBtn = button('Switch / Open Another Lesson', {
+            cls: 'block',
+            iconName: 'grid',
+            onclick: () => {
+                stop();
+                showSetup({ forceSetup: true });
+            },
+        });
         const resetCooldownActiveBtn = buildResetCooldownsButton('block');
 
         let confirmTimer = 0;
@@ -681,6 +732,7 @@ function renderLiveAttendanceTab(container, ctx) {
                         enforceInput, el('span', { class: 'track' }),
                         el('span', { class: 'switch-text' }, [el('strong', {}, 'Enforce GPS Geofencing'), el('span', { class: 'faint' }, coordsLabel)]),
                     ]),
+                    switchLessonBtn,
                     resetCooldownActiveBtn,
                     closeBtn,
                 ]),

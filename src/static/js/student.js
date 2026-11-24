@@ -322,9 +322,9 @@ export function renderStudentPortal(root, ctx) {
 function buildStudentTabs(ctx) {
     return [
         { id: 'checkin', label: 'Check-in', icon: 'qr', render: (c) => renderStudentHomeTab(c, ctx) },
-        { id: 'polls', label: 'Live Polls', icon: 'poll', render: (c) => renderPollsTab(c, { ...ctx, role: 'student' }) },
-        { id: 'comments', label: 'Comments & Suggestions', icon: 'message', render: (c) => renderCommentsTab(c, { ...ctx, role: 'student' }) },
-        { id: 'homework', label: 'PDF Homework Review', icon: 'file', render: (c) => renderHomeworkTab(c, { ...ctx, role: 'student' }) },
+        { id: 'polls', label: 'Polls', icon: 'poll', render: (c) => renderPollsTab(c, { ...ctx, role: 'student' }) },
+        { id: 'comments', label: 'Comments', icon: 'message', render: (c) => renderCommentsTab(c, { ...ctx, role: 'student' }) },
+        { id: 'homework', label: 'Homework', icon: 'file', render: (c) => renderHomeworkTab(c, { ...ctx, role: 'student' }) },
     ];
 }
 

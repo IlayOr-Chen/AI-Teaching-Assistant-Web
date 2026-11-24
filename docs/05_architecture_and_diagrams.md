@@ -251,7 +251,6 @@ classDiagram
         +GeminiClient gemini_client
         +validate_mp4_upload(filename, video_bytes, content_type)$ str
         -_build_prompt(filename, lesson_tag, lecturer_notes, size_kb)$ str
-        -_build_fallback_summary(filename, lesson_tag, lecturer_notes, size_kb)$ dict
         +summarize_video(filename, video_bytes, content_type, lesson_tag, lecturer_notes) dict
         +list_summaries() list~dict~
     }
@@ -260,12 +259,14 @@ classDiagram
         +FirebaseRepository repository
         +GeminiClient gemini_client
         +is_review_released(assignment, now_ts)$ bool
+        -_extract_docx_text(docx_bytes)$ str
+        -_extract_zip_text(zip_bytes, source_label)$ tuple~str,int~
         +validate_and_extract_pdf_text(filename, pdf_bytes, content_type)$ dict
+        +extract_public_git_repo_text(repo_url)$ dict
         +create_assignment(title, description, deadline_ts, lesson_tag) dict
         +end_submission_now(assignment_id, now_ts) dict
-        -_build_individual_review_fallback(title, student_name, extracted_text, page_count, word_count)$ dict
         -_generate_peer_comparison(assignment, target_submission, all_submissions) dict
-        +submit_homework_pdf(assignment_id, student_id, student_name, filename, pdf_bytes, content_type, now_ts) dict
+        +submit_homework_pdf(assignment_id, student_id, student_name, filename, pdf_bytes, content_type, now_ts, repo_url) dict
         +get_student_review_and_comparison(assignment_id, student_id, viewer_role, now_ts) dict
         -_format_assignment_overview(raw_assignment, viewer_id, now_ts) dict
         +list_assignments(viewer_id, now_ts) list~dict~
