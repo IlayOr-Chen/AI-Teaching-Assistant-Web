@@ -48,14 +48,14 @@ The Web-Based AI Teaching Assistant is a modular Python **FastAPI** web applicat
 
 ### 2.5 Feature 3 — On-the-Spot KISS Polls (`PollService`)
 * **FR-POLL-01 (Multiple-Choice Poll Lifecycle):** The Lecturer shall create polls with `2..8` distinct options and toggle voting open (`active=True`) or closed (`active=False`).
-* **FR-POLL-02 (Single-Vote Enforcement & Live Percentages):** Each student (`voter_id`) may vote at most once per poll; duplicate votes or votes on closed polls shall be rejected with HTTP `403`, and responses shall include live option counts and percentages (`0.0`..`100.0%`).
+* **FR-POLL-02 (Mutable Voting & Live Percentages):** Each student (`voter_id`) can cast a vote, click a different option to switch their vote, or click their currently selected option again to cancel/unvote (`vote_action`: `cast` / `switched` / `removed`); votes on closed polls are rejected with HTTP `403`, and responses include `viewer_vote_index` plus live option counts and percentages (`0.0`..`100.0%`).
 
-### 2.6 Feature 4 — ML Lecture Video Summary (`GeminiClient` & `VideoSummarizer`)
-* **FR-VID-01 (Lecturer Gemini Settings):** The Lecturer shall configure their Gemini API Key (masked in GET responses) and Gemini Model ID (defaulting to `gemini-2.5-flash`, with valid presets `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-2.5-pro`, and `gemini-2.0-flash`) under `/settings/gemini`.
-* **FR-VID-02 (Strict MP4 Validation, Gemini Files API Upload & Structured Summary):** `VideoSummarizer` shall accept `.mp4` (`video/mp4`) files ONLY, write an ASCII-safe temporary file (supporting Hebrew/Unicode filenames), upload the video via the official **Gemini Files API** (`client.files.upload`), poll until `ACTIVE`, and generate a real content-faithful structured JSON summary (`executive_summary`, `key_topics`, `core_takeaways`, `action_items`, and `delivery_insights` covering `pacing`, `clarity`, `audio_quality`, and `overall_rating`) before deleting the temporary and remote files in `finally:`.
+### 2.6 Feature 4 — Video AI Lecture Summary (`GeminiClient` & `VideoSummarizer`)
+* **FR-VID-01 (Lecturer Gemini Settings):** The Lecturer shall configure their Gemini API Key (`AIza...` AI Studio or `AQ....` Vertex AI Express, masked in GET responses) and a free-text Gemini Model ID (defaulting to `gemini-3.5-flash-lite` with quick-select pills `gemini-3.5-flash-lite`, `gemini-3.5-flash`, `gemini-2.5-flash`) under `/settings/gemini`.
+* **FR-VID-02 (YouTube URL URI, `<= 20 MB` MP4 Validation & Structured Summary):** `VideoSummarizer` shall accept **either** public YouTube URLs (normalized and sent directly to Gemini via `types.Part.from_uri(file_uri=..., mime_type="video/mp4")` with zero local download) **or** `.mp4` (`video/mp4`) files up to `20 MB` (via Gemini Files API for `AIza...` or inline `Part.from_bytes` for `AQ....`), raising explicit errors on missing/failing API keys (zero fake fallbacks) and outputting `executive_summary`, `key_topics`, `core_takeaways`, `action_items`, and `delivery_insights`.
 
 ### 2.7 Feature 5 — Deep Homework Review & Peer Comparison (`HomeworkReviewer`)
-* **FR-HW-01 (Multi-Format File Upload & Public Git Repository URL Ingestion):** `HomeworkReviewer` shall accept multi-format file uploads (`.pdf`, `.docx`, `.txt`, `.md`, `.zip`, and source code `.py`, `.java`, `.c`, `.cpp`, `.h`, `.js`, `.ts`, `.html`, `.css`, `.json`) AND public GitHub repository URLs (`https://github.com/owner/repo`, downloaded over HTTPS zipball without a local `git` binary, extracting `README.md` and source files while skipping `node_modules/`, `venv/`, `.git/`, `__pycache__/`, and binaries).
+* **FR-HW-01 (Per-Student BYOK + Multi-Format Upload & Public Git Repo Ingestion):** Student submissions require the student's own browser-stored Gemini API key via `X-Gemini-Api-Key` / `X-Gemini-Model` headers (rejecting missing keys with HTTP `400` rather than falling back to Lecturer/env keys) and support multi-format files (`.pdf`, `.docx`, `.txt`, `.md`, `.zip`, source code `.py`, `.java`, `.c`, `.cpp`, `.h`, `.js`, `.ts`, `.html`, `.css`, `.json`) including Hebrew/sparse PDFs, as well as public GitHub repository URLs (`https://github.com/owner/repo`).
 * **FR-HW-02 (Gated Release Rule):** While `is_review_released` is `False` (before `deadline_ts` and before *"End Submission Now"*), students can upload/replace their submission, but `review` and `peer_comparison` shall be strictly withheld (`None`).
 * **FR-HW-03 (Deadline & Manual Release Unlock):** Once `now_ts >= deadline_ts` OR the Lecturer clicks **"End Submission Now"** (`ended_manually=True`), new submissions are blocked (`403`) and students unlock their **Concise Review Card** and **Dedicated Peer Comparison Column**.
 * **FR-HW-04 (First-Submission Edge Case):** When `total_submissions == 1`, `peer_comparison` shall set `is_first_submission_only=True` and return the exact notice: *"This is the first submission received for this assignment, so peer comparison is not yet available. Comparative insights will appear once additional students submit."*
@@ -178,7 +178,7 @@ Target RTDB Instance: `https://ai-teaching-assistant-web-default-rtdb.firebaseio
   "settings": {
     "gemini": {
       "api_key": "<lecturer_gemini_api_key>",
-      "model_id": "gemini-2.5-flash-lite",
+      "model_id": "gemini-3.5-flash-lite",
       "updated_at": 1732400500
     }
   },

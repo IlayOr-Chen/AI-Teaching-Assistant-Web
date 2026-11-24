@@ -78,6 +78,7 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
         ".radius-pills",
         ".radius-pill",
         ".combo-email",
+        'input[type="url"]',
     ):
         assert expected_selector in css_res.text, f"Missing CSS rule: {expected_selector}"
 
@@ -107,8 +108,21 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
             "Scan to check in — protected by GPS Geofencing & 15-min device cooldown.",
         ],
         "/static/js/student.js": ["renderStudentCheckin", "renderStudentLogin", "renderStudentPortal", "combo-email"],
+        "/static/js/polls_comments.js": ["Selected — click again to unvote"],
+        "/static/js/ai_tools.js": [
+            "gemini-3.5-flash-lite",
+            "gemini-3.5-flash",
+            "gemini-2.5-flash",
+            "Clear Key",
+            "ta_student_gemini_api_key",
+            "ta_student_gemini_model",
+            "X-Gemini-Api-Key",
+            "X-Gemini-Model",
+            "Your Gemini API Key & Model (BYOK)",
+            "/api/video/summarize-youtube",
+        ],
         "/static/js/ui.js": ["toast", "createTabs", "pageShell", "withLoading"],
-        "/static/js/api.js": ["ApiError", "export const api"],
+        "/static/js/api.js": ["ApiError", "export const api", "extraHeaders"],
         "/static/js/icons.js": ["export function icon"],
     }
     for path, expected_tokens in js_files.items():
@@ -118,6 +132,10 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
         assert "javascript" in content_type, f"Unexpected content-type for {path}: {content_type}"
         for token in expected_tokens:
             assert token in res.text, f"Expected '{token}' in {path}"
+    # Confirm free-text Gemini model ID replaced rigid __custom__ dropdown
+    ai_js = ui_client.get("/static/js/ai_tools.js").text
+    assert "__custom__" not in ai_js
+    assert "modelSelect" not in ai_js
     # Confirm public lecturer self-registration UI and email placeholder leak were removed from lecturer.js
     lec_js = ui_client.get("/static/js/lecturer.js").text
     assert "Create lecturer account" not in lec_js

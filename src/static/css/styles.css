@@ -185,7 +185,7 @@ h3 { font-size: 1.02rem; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 label.field { display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.85rem; font-weight: 600; color: var(--text-dim); }
-input[type="text"], input[type="email"], input[type="password"], input[type="number"], input[type="search"], select {
+input[type="text"], input[type="email"], input[type="password"], input[type="number"], input[type="search"], input[type="url"], select {
     font: inherit; color: var(--text); background: rgba(8, 12, 28, 0.55); border: 1px solid var(--border);
     border-radius: var(--radius-sm); padding: 0.75rem 0.9rem; min-height: 46px; width: 100%;
     transition: border-color 0.25s, box-shadow 0.25s, background 0.25s;

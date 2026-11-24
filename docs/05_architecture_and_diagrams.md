@@ -33,11 +33,11 @@ flowchart TB
         RosterSvc["RosterImporter<br/>(openpyxl Hebrew/NaN Parser)"]
         AttMgr["AttendanceManager<br/>(Rotating QR + Haversine Geofence + 15m Cooldown)"]
         YoloSvc["PhotoHeadCounter<br/>(Local YOLOv8n + GREEN/ORANGE/RED Logic)"]
-        PollSvc["PollService<br/>(Live Polls + Single-Vote Guard)"]
+        PollSvc["PollService<br/>(Live Polls + Mutable Voting)"]
         CmtSvc["CommentService<br/>(Public/Private + Anonymous + Threads)"]
-        GemCli["GeminiClient<br/>(Model/Key Settings + JSON Generator)"]
-        VidSvc["VideoSummarizer<br/>(Strict MP4 + Delivery Insights)"]
-        HwSvc["HomeworkReviewer<br/>(Strict PDF + Gated Release + Peer Comparison)"]
+        GemCli["GeminiClient<br/>(AIza/AQ Client + BYOK + JSON Generator)"]
+        VidSvc["VideoSummarizer<br/>(YouTube URI & MP4 <=20MB + Insights)"]
+        HwSvc["HomeworkReviewer<br/>(Multi-Format/Repo + Student BYOK + Gate)"]
     end
 
     subgraph InfraTier["4. Persistence & AI Engine Tier"]
@@ -45,7 +45,7 @@ flowchart TB
         MockFB["InMemoryFirebaseAdapter<br/>(Deterministic pytest Store)"]
         LiveFB[("Firebase Realtime Database<br/>ai-teaching-assistant-web-default-rtdb")]
         YoloWeights[("Local Ultralytics YOLOv8n<br/>(yolov8n.pt, imgsz=1280)")]
-        GeminiAPI[("Google Gemini API<br/>(gemini-2.5-flash-lite)")]
+        GeminiAPI[("Google Gemini API<br/>(gemini-3.5-flash-lite)")]
     end
 
     StuUI --> GeoAPI
@@ -239,19 +239,21 @@ classDiagram
         +AppConfig config
         -Callable _transport
         +mask_api_key(api_key)$ str
-        +resolve_credentials() tuple~str,str~
+        -_build_genai_client(api_key)$ Any
+        +resolve_credentials(api_key_override, model_id_override, allow_stored_key) tuple~str,str~
         +get_settings() dict
         +update_settings(api_key, model_id) dict
         -_extract_json_dict(raw_text)$ dict
-        +generate_structured_json(prompt, fallback_builder, media_bytes, mime_type) dict
+        +generate_structured_json(prompt, media_bytes, mime_type, file_uri, api_key_override, model_id_override, allow_stored_key, missing_key_error) dict
     }
 
     class VideoSummarizer {
         +FirebaseRepository repository
         +GeminiClient gemini_client
         +validate_mp4_upload(filename, video_bytes, content_type)$ str
+        +validate_youtube_url(youtube_url)$ str
         -_build_prompt(filename, lesson_tag, lecturer_notes, size_kb)$ str
-        +summarize_video(filename, video_bytes, content_type, lesson_tag, lecturer_notes) dict
+        +summarize_video(filename, video_bytes, content_type, lesson_tag, lecturer_notes, youtube_url) dict
         +list_summaries() list~dict~
     }
 
@@ -372,11 +374,15 @@ sequenceDiagram
     StudentA->>API: POST /api/polls/{poll_id}/vote (option_index=0)
     API->>Poll: submit_vote(poll_id, "stu_a", 0)
     Poll->>DB: get("/polls/{poll_id}")
-    alt Voter already in votes_map
-        Poll-->>StudentA: HTTP 403 ("You have already voted in this poll.")
-    else First vote by stu_a
+    alt First vote by stu_a
         Poll->>DB: set("/polls/{poll_id}/votes/stu_a", {option_index: 0})
-        Poll-->>StudentA: Updated counts & live percentages (100.0%)
+        Poll-->>StudentA: vote_action="cast" (100.0%)
+    else Same option clicked again (unvote)
+        Poll->>DB: delete("/polls/{poll_id}/votes/stu_a")
+        Poll-->>StudentA: vote_action="removed" (0.0%)
+    else Different option clicked (switch vote)
+        Poll->>DB: set("/polls/{poll_id}/votes/stu_a", {option_index: 1})
+        Poll-->>StudentA: vote_action="switched" (updated bars)
     end
 
     StudentA->>API: POST /api/comments (text, visibility="private", is_anonymous=false, scope_tag="Lesson 1")
@@ -414,11 +420,11 @@ sequenceDiagram
     API->>HW: create_assignment()
     HW->>DB: set("/homework_assignments/{hw_id}", ended_manually=false)
 
-    Student1->>API: POST /api/homework/assignments/{hw_id}/submit (file="alice.pdf")
-    API->>HW: submit_homework_pdf(hw_id, "stu_1", "alice.pdf", pdf_bytes)
-    HW->>HW: validate_and_extract_pdf_text() via pypdf
-    HW->>Gem: generate_structured_json(review_prompt)
-    Gem-->>HW: structured review card
+    Student1->>API: POST /api/homework/assignments/{hw_id}/submit (file + X-Gemini-Api-Key header)
+    API->>HW: submit_homework_pdf(hw_id, "stu_1", "alice.pdf", pdf_bytes, gemini_api_key, require_student_key=True)
+    HW->>HW: validate_and_extract_pdf_text() (or extract_public_git_repo_text())
+    HW->>Gem: generate_structured_json(review_prompt, api_key_override=student_key)
+    Gem-->>HW: structured review card (NO silent fallback)
     HW->>DB: set("/homework_assignments/{hw_id}/submissions/stu_1", record)
     Note over HW: Gated Release Rule: is_review_released() == False
     HW-->>Student1: status="submitted_pending_release", review_released=False, review=None, peer_comparison=None

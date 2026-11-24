@@ -88,38 +88,38 @@ Every feature in the Web-Based AI Teaching Assistant is designed around explicit
 2. Students tap their chosen option on their phones; animated percentage bars update live across both Student and Lecturer screens.
 
 ### Edge Cases & Exception Flows
-* **EC-05.1 (Duplicate Vote Attempt):** A student attempts to vote a second time on the same poll. `PollService.submit_vote` detects `voter_id` in `/polls/{poll_id}/votes` and rejects the request with HTTP `403` (*"You have already voted in this poll."*).
+* **EC-05.1 (Vote Switch & Unvote):** Clicking a different poll option switches the student's saved selection (`vote_action="switched"`) and updates counts immediately; clicking the already-selected option removes the student's vote (`vote_action="removed"`).
 * **EC-05.2 (Late Vote After Lecturer Closes Poll):** Once the Lecturer clicks **"Close Voting"**, any student vote submission is rejected with HTTP `403` (*"Voting is closed for this poll."*).
 
 ---
 
-## UC-06: ML Lecture Video Summary (MP4 Only + Configurable Gemini Model)
+## UC-06: Video AI Lecture Summary (YouTube URL or MP4 <= 20 MB + Configurable Model)
 
 * **Primary Actor:** Lecturer
 
 ### Happy Case (Main Success Scenario)
-1. Lecturer opens the **MP4 Lecture Summary** tab, optionally enters/updates their Gemini API Key and Model ID (`gemini-2.5-flash-lite` or custom `gemini-3.5-flash-lite`), and selects an `.mp4` lecture video.
-2. A live processing indicator appears while `VideoSummarizer` and `GeminiClient` analyze the recording, producing a structured card with **Executive Summary**, **Key Topics**, **Core Takeaways**, **Action Items**, and **Lecturer Delivery Insights** (`Pacing`, `Clarity`, `Audio Quality`, `Overall Rating`) — directly improving on the verbose paragraphs in `/assets/Example_ Class  by zoom).docx`.
+1. Lecturer opens the **Video AI** tab, enters their AI Studio (`AIza...`) or Vertex AI Express (`AQ....`) Gemini API key, keeps **`gemini-3.5-flash-lite`** (or enters any custom Model ID), and either pastes a public YouTube URL OR selects an `.mp4` lecture video (`<= 20 MB`).
+2. A live processing indicator appears while `VideoSummarizer` and `GeminiClient` analyze the lecture directly (via `Part.from_uri` for YouTube, `Files.upload` for `AIza...` MP4, or inline `Part.from_bytes` for `AQ....` MP4), producing a structured card with **Executive Summary**, **Key Topics**, **Core Takeaways**, **Action Items**, and **Lecturer Delivery Insights** (`Pacing`, `Clarity`, `Audio Quality`, `Overall Rating`).
 
 ### Edge Cases & Exception Flows
-* **EC-06.1 (Unsupported Video Format Uploaded):** Lecturer attempts to upload `.avi`, `.mov`, `.mkv`, or `.docx`. `VideoSummarizer.validate_mp4_upload` rejects the file immediately (`400 Bad Request`: *"Unsupported video format. Only MP4 (.mp4) lecture video files are accepted."*).
-* **EC-06.2 (Missing External Gemini API Key / Offline Demo Fallback):** If no external Gemini key is configured or internet quota is unavailable during a live demo, `GeminiClient` seamlessly falls back to its deterministic structured pedagogical analyzer so the classroom demonstration never crashes.
+* **EC-06.1 (Unsupported Format, > 20 MB MP4, or Non-YouTube URL):** Uploading non-MP4 files (`.avi`, `.docx`), `.mp4` clips larger than `20 MB`, or non-YouTube URLs is rejected cleanly (`400 Bad Request`) with a descriptive message.
+* **EC-06.2 (Missing or Invalid Gemini API Key):** If no Gemini API key is configured, `GeminiClient` explicitly raises a real actionable error (`400`/`502` JSON detail surfaced in UI toast) rather than returning fake fallback text.
 
 ---
 
-## UC-07: Deep Homework Review & Peer Comparison (PDF Only + Gated Release)
+## UC-07: Deep Homework Review & Peer Comparison (BYOK + Multi-Format/GitHub + Gated Release)
 
 * **Primary Actors:** Lecturer & Student
 
 ### Happy Case (Main Success Scenario — Multi-Student Cohort)
 1. Lecturer creates a homework assignment with a future submission deadline.
-2. Multiple students upload their `.pdf` reports (`pypdf` extracts text, page count, and word count).
-3. Once the deadline expires OR the Lecturer clicks **"End Submission Now"**, students open the **PDF Homework Review** tab and view:
+2. Students enter their own Gemini API Key & Model in the **Your Gemini API Key & Model (BYOK)** browser `localStorage` panel and upload a supported file (`.pdf`, `.docx`, `.zip`, `.txt`, `.md`, or source code) OR submit a public GitHub repository URL (`X-Gemini-Api-Key` / `X-Gemini-Model` sent per request).
+3. Once the deadline expires OR the Lecturer clicks **"End Submission Now"**, students open the **Homework** tab and view:
    * **Column 1 (Concise Review & Summary Card):** Brief Summary, Strengths, Areas to Improve, and Actionable Recommendations.
-   * **Column 2 (Dedicated Peer Comparison Column):** Relative Strengths vs. Peers, Unique Ideas, and Common Cohort Gaps across all submitted PDFs.
+   * **Column 2 (Dedicated Peer Comparison Column):** Relative Strengths vs. Peers, Unique Ideas, and Common Cohort Gaps across all submitted works.
 
 ### Edge Cases & Exception Flows
-* **EC-07.1 (Gated Release Rule — Student Checks Before Deadline / End Now):** While submissions are still open (`review_released=False`), a student who uploaded their PDF can replace their PDF file, but `review` and `peer_comparison` are strictly withheld (`None`) with a lock banner explaining that feedback unlocks only after the deadline or when the Lecturer clicks *"End Submission Now"*.
-* **EC-07.2 (First-Submission Edge Case — Only 1 Student Submitted):** If only 1 student submitted a PDF before submissions close (`total_submissions == 1`, `peer_count == 0`), Column 1 displays the student's individual AI review card while Column 2 displays the exact notice:
+* **EC-07.1 (Gated Release Rule — Student Checks Before Deadline / End Now):** While submissions are still open (`review_released=False`), a student can replace their submission, but `review` and `peer_comparison` remain strictly withheld (`None`) with a lock banner until the deadline or *"End Submission Now"*.
+* **EC-07.2 (First-Submission Edge Case — Only 1 Student Submitted):** If only 1 student submitted before submissions close (`total_submissions == 1`, `peer_count == 0`), Column 1 displays the student's individual AI review card while Column 2 displays the exact notice:
   > *"This is the first submission received for this assignment, so peer comparison is not yet available. Comparative insights will appear once additional students submit."*
-* **EC-07.3 (Non-PDF Upload or Late Submission After Gate Closed):** Uploading a `.docx`/`.txt` file is rejected with HTTP `400` (*"Only PDF (.pdf) files are accepted"*); attempting to upload a PDF after the deadline or after *"End Submission Now"* is rejected with HTTP `403` (*"Submissions are closed for this assignment"*).
+* **EC-07.3 (Unsupported File/URL, Missing BYOK Key, or Late Submission):** Uploading unsupported files (`.exe`), omitting `X-Gemini-Api-Key` (`400`: *"Please enter your Gemini API Key before submitting homework for AI review."*), or submitting after deadline / *"End Submission Now"* (`403`) is rejected with a clear JSON message surfaced in UI toasts; Hebrew filenames and sparse PDFs are handled without HTTP 500 errors.

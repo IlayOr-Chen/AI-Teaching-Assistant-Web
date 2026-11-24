@@ -107,8 +107,8 @@ We inspected `/assets/Example_ Class  by zoom).docx` (`14,837 bytes`, recording 
 ### 6.2 Comparison: Zoom AI Companion vs. Our `VideoSummarizer` (MP4 + Configurable `GeminiClient`)
 | Dimension | Raw Zoom Auto-Summary (`Example_ Class  by zoom).docx`) | Our `VideoSummarizer` (`src/services/video_summarizer.py`) |
 | :--- | :--- | :--- |
-| **Input Validation** | Tied strictly to Zoom cloud recordings. | Accepts standard `.mp4` (`video/mp4`) files directly from the Lecturer Dashboard with strict extension & MIME validation. |
-| **Model Flexibility** | Fixed proprietary Zoom backend. | Configurable Lecturer Gemini API Key & Model ID (`/settings/gemini`), defaulting to `gemini-2.5-flash-lite` and supporting custom IDs (`gemini-3.5-flash-lite`). |
+| **Input Validation** | Tied strictly to Zoom cloud recordings. | Accepts **either** public YouTube URLs (analyzed directly via `types.Part.from_uri` with zero local download) **or** standard `.mp4` (`video/mp4`, `<= 20 MB`) files directly from the Lecturer Dashboard. |
+| **Model & Auth Flexibility** | Fixed proprietary Zoom backend. | Configurable Lecturer Gemini API Key (`AIza...` AI Studio or `AQ....` Vertex AI Express) & free-text Model ID (`/settings/gemini`), defaulting to **`gemini-3.5-flash-lite`** with presets `gemini-3.5-flash` and `gemini-2.5-flash`. |
 | **Structure & Conciseness** | `28` paragraphs (`695` words) of repetitive prose with `"Bez" / "בז" / "בעז"` ASR artifacts. | Crisp JSON card divided into **Executive Summary** (2–3 sentences), **Key Topics** (3–5 bullets), **Core Takeaways** (3–5 bullets), and **Action Items**. |
 | **Lecturer Delivery Feedback** | **None.** | Dedicated **Lecturer Delivery Insights** card evaluating **Pacing**, **Clarity**, **Audio Quality**, and **Overall Rating**. |
 
