@@ -337,6 +337,8 @@ class GeminiClient:
         if code in (503, 429):
             return True
         text = str(exc).upper()
+        if "400" in text or "INVALID_ARGUMENT" in text:
+            return False
         transient_markers = (
             "503",
             "UNAVAILABLE",
@@ -573,9 +575,20 @@ class GeminiClient:
                         "YouTube TRANSCRIPT layer unavailable or failed (%s); falling back automatically to AUDIO layer.",
                         transcript_exc,
                     )
-                    parsed, used_model, used_mode = _run_across_models_with_retry(
-                        "audio"
-                    )
+                    try:
+                        parsed, used_model, used_mode = _run_across_models_with_retry(
+                            "audio"
+                        )
+                    except GeminiHighDemandError:
+                        raise
+                    except Exception as audio_exc:
+                        logger.warning(
+                            "YouTube AUDIO layer unavailable or failed (%s); falling back automatically to Low FPS (0.2) video.",
+                            audio_exc,
+                        )
+                        parsed, used_model, used_mode = _run_across_models_with_retry(
+                            "full_video"
+                        )
             else:
                 parsed, used_model, used_mode = _run_across_models_with_retry(
                     clean_mode

@@ -344,6 +344,12 @@ def test_youtube_content_layers_modes_transcript_to_audio_fallback_and_503_model
             if scenario["mode"] == "no_transcript" and layer_names == ["TRANSCRIPT"]:
                 raise ValueError("400 INVALID_ARGUMENT: No transcript available for this video.")
 
+            if scenario["mode"] == "no_transcript_or_audio" and layer_names in (
+                ["TRANSCRIPT"],
+                ["AUDIO"],
+            ):
+                raise ValueError("400 INVALID_ARGUMENT: Layer unavailable for this video.")
+
             if scenario["mode"] == "primary_503_then_fallback_ok":
                 if model == "gemini-3.5-flash-lite":
                     raise RuntimeError("503 UNAVAILABLE: The model is overloaded due to high demand.")
@@ -401,6 +407,16 @@ def test_youtube_content_layers_modes_transcript_to_audio_fallback_and_503_model
     )
     assert [c["layers"] for c in calls] == [["TRANSCRIPT"], ["AUDIO"]]
     assert res_fallback_audio["video_mode"] == "audio"
+
+    # 3b. Automatic 3-step fallback TRANSCRIPT -> AUDIO -> Low FPS (0.2) video when both layers fail
+    calls.clear()
+    scenario["mode"] = "no_transcript_or_audio"
+    res_fallback_fps = summarizer.summarize_video(
+        youtube_url="https://www.youtube.com/watch?v=8UY3LQI529o",
+    )
+    assert [c["layers"] for c in calls] == [["TRANSCRIPT"], ["AUDIO"], None]
+    assert calls[-1]["fps"] == 0.2
+    assert res_fallback_fps["video_mode"] == "full_video"
 
     # 4. Automatic 503 retry + model fallback (gemini-3.5-flash-lite fails 2x -> gemini-3.5-flash succeeds)
     calls.clear()
@@ -1039,19 +1055,20 @@ def test_gemini_video_and_homework_http_endpoints_and_ui_assets() -> None:
         unlocked_body["peer_comparison"]["notice"] == FIRST_SUBMISSION_NOTICE
     )
 
-    # 7. Verify frontend ai_tools.js asset loads cleanly with YouTube-only UI, rich sections, & Copy button
+    # 7. Verify frontend ai_tools.js asset loads cleanly with YouTube-only KISS UI, rich sections, & Copy button
     ai_js = lec_client.get("/static/js/ai_tools.js")
     assert ai_js.status_code == 200
     assert "javascript" in ai_js.headers.get("content-type", "")
     assert "renderVideoSummaryTab" in ai_js.text
     assert "renderHomeworkTab" in ai_js.text
     assert "AI Lecture Video Summarizer" in ai_js.text
-    assert "Fast (Transcript)" in ai_js.text
-    assert "Audio Only" in ai_js.text
-    assert "Full Video (Low FPS)" in ai_js.text
+    assert "Analyze YouTube Video" in ai_js.text
     assert "Lecture Overview & Walkthrough" in ai_js.text
     assert "Key Concepts & Definitions" in ai_js.text
     assert "Quick Review Questions" in ai_js.text
     assert "Summary copied to clipboard" in ai_js.text
     assert "Upload MP4 File" not in ai_js.text
+    assert "Fast (Transcript)" not in ai_js.text
+    assert "Audio Only" not in ai_js.text
+    assert "Full Video (Low FPS)" not in ai_js.text
     assert "__custom__" not in ai_js.text

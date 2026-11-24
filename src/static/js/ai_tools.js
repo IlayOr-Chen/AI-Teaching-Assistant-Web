@@ -23,12 +23,6 @@ const VALID_GEMINI_MODELS = [
     'gemini-2.5-flash',
 ];
 
-const YOUTUBE_VIDEO_MODE_OPTIONS = [
-    { id: 'transcript', label: 'Fast (Transcript)', hint: 'Default — ideal for long 45–90 min lectures' },
-    { id: 'audio', label: 'Audio Only', hint: 'Analyzes spoken audio & delivery without video frames' },
-    { id: 'full_video', label: 'Full Video (Low FPS)', hint: 'Uses fps=0.2 for short lectures with slides/whiteboards' },
-];
-
 const STUDENT_BYOK_KEY_STORAGE = 'ta_student_gemini_api_key';
 const STUDENT_BYOK_MODEL_STORAGE = 'ta_student_gemini_model';
 
@@ -205,7 +199,7 @@ export function renderVideoSummaryTab(container, ctx) {
         return headers;
     };
 
-    /* ----- YouTube URL Summarizer + Mode Selector Pills + Summary List ----- */
+    /* ----- YouTube URL Summarizer (One Clean Input + One Button) + Summary List ----- */
     const lessonSelect = el('select', {}, LESSON_TAGS.map((t) => el('option', { value: t }, t)));
     const notesInput = el('input', {
         type: 'text',
@@ -217,28 +211,6 @@ export function renderVideoSummaryTab(container, ctx) {
         style: 'min-width:260px;flex:1',
     });
 
-    let activeVideoMode = 'transcript';
-    const modePillButtons = new Map();
-    const modePillsBar = el('div', {
-        class: 'radius-pills',
-        role: 'group',
-        'aria-label': 'YouTube lecture analysis mode',
-    }, YOUTUBE_VIDEO_MODE_OPTIONS.map((opt) => {
-        const pill = el('button', {
-            type: 'button',
-            class: `radius-pill ${opt.id === activeVideoMode ? 'active' : ''}`.trim(),
-            title: opt.hint,
-            onclick: () => {
-                activeVideoMode = opt.id;
-                for (const [id, btnNode] of modePillButtons.entries()) {
-                    btnNode.classList.toggle('active', id === activeVideoMode);
-                }
-            },
-        }, opt.label);
-        modePillButtons.set(opt.id, pill);
-        return pill;
-    }));
-
     const analyzeYoutubeBtn = button('Analyze YouTube Video', { cls: 'primary', iconName: 'sparkles' });
     const processingHost = el('div', { class: 'hidden' });
     const summariesHost = el('div', { class: 'stack' });
@@ -246,9 +218,9 @@ export function renderVideoSummaryTab(container, ctx) {
     const renderSummaryCard = (s) => {
         const del = s.delivery_insights || {};
         const modeLabelMap = {
-            transcript: 'Fast (Transcript)',
-            audio: 'Audio Only',
-            full_video: 'Full Video (Low FPS)',
+            transcript: 'YouTube Transcript',
+            audio: 'YouTube Audio',
+            full_video: 'YouTube Video (Low FPS)',
         };
         const modeBadge = modeLabelMap[s.video_mode] || 'YouTube Video';
 
@@ -374,11 +346,10 @@ export function renderVideoSummaryTab(container, ctx) {
             return;
         }
         const activeModel = getSelectedModelId();
-        const modeMeta = YOUTUBE_VIDEO_MODE_OPTIONS.find((o) => o.id === activeVideoMode) || YOUTUBE_VIDEO_MODE_OPTIONS[0];
         mount(processingHost, el('div', { class: 'processing-pulse' }, [
             el('span', { class: 'spinner' }),
             el('div', { class: 'stack', style: 'gap:0.15rem' }, [
-                el('strong', {}, `Analyzing YouTube lecture with Gemini (${activeModel} · ${modeMeta.label})…`),
+                el('strong', {}, `Analyzing YouTube lecture with Gemini (${activeModel})…`),
                 el('span', { class: 'faint' }, 'Generating executive TL;DR, detailed narrative walkthrough, key concepts, study questions, and lecturer delivery insights…'),
             ]),
         ]));
@@ -390,7 +361,6 @@ export function renderVideoSummaryTab(container, ctx) {
                     youtube_url: ytUrl,
                     lesson_tag: lessonSelect.value,
                     lecturer_notes: notesInput.value.trim(),
-                    video_mode: activeVideoMode,
                 }, getLecturerGeminiHeaders());
                 toast('YouTube lecture summary generated!', 'success');
                 youtubeUrlInput.value = '';
@@ -422,7 +392,6 @@ export function renderVideoSummaryTab(container, ctx) {
             ]),
             el('div', { class: 'row' }, [
                 youtubeUrlInput,
-                modePillsBar,
                 analyzeYoutubeBtn,
             ]),
             processingHost,
