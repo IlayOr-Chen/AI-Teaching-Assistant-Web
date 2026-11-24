@@ -157,6 +157,7 @@ classDiagram
         +verify_password(password, stored_hash)$ bool
         +create_jwt_token(subject_id, role, email, full_name, extra_claims, expires_in_seconds) str
         +verify_jwt_token(token, required_role) dict
+        +seed_default_lecturer() dict
         +register_lecturer(full_name, email, password, access_code) dict
         +login_lecturer(email, password) dict
         +authenticate_student(student_id, email, full_name) dict
@@ -171,6 +172,7 @@ classDiagram
         -_resolve_column_indices(header_row)$ dict
         +parse_excel_rows(source) tuple~list,int~
         +import_from_excel(source, replace_existing) dict
+        +ensure_roster_seeded(default_asset_path) dict
         +list_students(search_query, group_filter) list~dict~
         +get_student(student_id) dict
     }
@@ -192,6 +194,7 @@ classDiagram
         +verify_qr_token(qr_token, expected_lesson_id) dict
         +check_device_cooldown(device_id, now_ts) dict
         +record_device_cooldown(device_id, student_id, lesson_id, now_ts) dict
+        +reset_all_device_cooldowns(now_ts) dict
         +submit_qr_checkin(lesson_id, student_id, qr_token, student_lat, student_lng, device_cookie_value, now_ts) dict
         +set_manual_attendance(lesson_id, student_id, status) dict
         +get_lesson_attendance_report(lesson_id) dict

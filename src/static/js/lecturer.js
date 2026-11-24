@@ -18,70 +18,47 @@ import {
 /* ------------------------------------------------------------------ */
 
 /**
- * Purpose: Render the lecturer sign-in / registration screen (registration needs the access code).
+ * Purpose: Render the restricted lecturer sign-in screen (public self-registration is disabled;
+ *          lecturer accounts are configured strictly via backend environment configuration).
  * Inputs:  root (HTMLElement); handlers {onAuthenticated(user), onBack()}.
  * Outputs: void.
  */
 export function renderLecturerAuth(root, { onAuthenticated, onBack }) {
-    let mode = 'login';
     const shell = pageShell({
         rightSlot: [button('Back', { cls: 'ghost sm', onclick: onBack })],
     });
-    const formHost = el('div', { class: 'stack' });
 
     const field = (label, name, type, placeholder, autocomplete) => el('label', { class: 'field' }, [
         label,
         el('input', { name, type, placeholder, autocomplete, required: true }),
     ]);
 
-    const seg = el('div', { class: 'segmented', role: 'group', 'aria-label': 'Sign in or register' });
-    const loginBtn = el('button', { type: 'button', 'aria-pressed': 'true', onclick: () => setMode('login') }, 'Sign in');
-    const registerBtn = el('button', { type: 'button', 'aria-pressed': 'false', onclick: () => setMode('register') }, 'Register');
-    seg.append(loginBtn, registerBtn);
+    const submit = button('Sign in', { cls: 'primary lg block', type: 'submit' });
+    const form = el('form', { class: 'stack', autocomplete: 'on' }, [
+        field('Email', 'email', 'email', 'adminL@gmail.com', 'email'),
+        field('Password', 'password', 'password', 'Your password', 'current-password'),
+        submit,
+    ]);
 
-    const renderForm = () => {
-        const isRegister = mode === 'register';
-        const submit = button(isRegister ? 'Create lecturer account' : 'Sign in', { cls: 'primary lg block', type: 'submit' });
-        const form = el('form', { class: 'stack', autocomplete: 'on' }, [
-            isRegister ? field('Full name', 'full_name', 'text', 'Dr. Jane Cohen', 'name') : null,
-            field('Email', 'email', 'email', 'you@university.ac.il', 'email'),
-            field('Password', 'password', 'password', isRegister ? 'At least 6 characters' : 'Your password',
-                isRegister ? 'new-password' : 'current-password'),
-            isRegister ? field('Lecturer access code', 'access_code', 'password', 'Provided by the course admin', 'off') : null,
-            submit,
-        ]);
-        form.addEventListener('submit', (event) => {
-            event.preventDefault();
-            const data = Object.fromEntries(new FormData(form).entries());
-            withLoading(submit, async () => {
-                const result = await api.post(
-                    isRegister ? '/api/auth/lecturer/register' : '/api/auth/lecturer/login',
-                    data,
-                );
-                toast(`Welcome, ${result.user.full_name}!`, 'success');
-                onAuthenticated(result.user);
-            });
+    form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        const data = Object.fromEntries(new FormData(form).entries());
+        withLoading(submit, async () => {
+            const result = await api.post('/api/auth/lecturer/login', data);
+            toast(`Welcome, ${result.user.full_name}!`, 'success');
+            onAuthenticated(result.user);
         });
-        mount(formHost, form);
-        form.querySelector('input')?.focus();
-    };
-
-    function setMode(next) {
-        mode = next;
-        loginBtn.setAttribute('aria-pressed', String(mode === 'login'));
-        registerBtn.setAttribute('aria-pressed', String(mode === 'register'));
-        renderForm();
-    }
+    });
 
     shell.content.append(el('div', { class: 'auth-wrap stack' }, [
         el('div', { class: 'center' }, [
             el('h1', {}, ['Lecturer ', el('span', { class: 'gradient-text' }, 'sign in')]),
             el('p', { class: 'muted' }, 'Run attendance, polls and AI tools for your class.'),
         ]),
-        el('div', { class: 'card stack' }, [seg, formHost]),
+        el('div', { class: 'card stack' }, [form]),
     ]));
     mount(root, shell.root);
-    renderForm();
+    form.querySelector('input')?.focus();
 }
 
 /* ------------------------------------------------------------------ */
@@ -179,11 +156,11 @@ function renderOverviewTab(container, ctx) {
     const renderImport = (count) => {
         const fileInput = el('input', { type: 'file', accept: '.xlsx', class: 'hidden' });
         const uploadBtn = button('Upload roster (.xlsx)', { cls: 'primary', iconName: 'upload' });
-        const bundledBtn = button('Use bundled course roster', { cls: '' });
+        const bundledBtn = button('Sync from Course Excel', { cls: '', iconName: 'refresh' });
 
         const runImport = (btn, request) => withLoading(btn, async () => {
             const result = await request();
-            toast(`Imported ${result.total_imported} students (${result.unassigned_group_count} without a group).`, 'success');
+            toast(`Synced ${result.total_imported} students from Excel (${result.unassigned_group_count} without a group).`, 'success');
             await refresh();
         });
 
@@ -201,8 +178,8 @@ function renderOverviewTab(container, ctx) {
         mount(importHost, [
             count === 0
                 ? el('div', { class: 'banner warn' }, [el('span', { html: icon('alert') }), el('span', {}, 'No students yet. Import the course roster so students can check in by name.')])
-                : el('p', { class: 'muted' }, `${count} students are loaded. Re-importing replaces the roster.`),
-            el('div', { class: 'row' }, [uploadBtn, bundledBtn, fileInput]),
+                : el('p', { class: 'muted' }, `${count} students are loaded from assets/courseid_130158_participants.xlsx. Re-importing updates the roster.`),
+            el('div', { class: 'row' }, [bundledBtn, uploadBtn, fileInput]),
             el('p', { class: 'faint' }, 'Expected columns: שם פרטי, שם משפחה, דוא"ל, קבוצות (empty group cells are fine).'),
         ]);
     };
@@ -278,22 +255,35 @@ function buildQrDisplay() {
 function renderLiveAttendanceTab(container, ctx) {
     let disposed = false;
     let stopActive = null; // cleanup for the currently displayed active session
+    let stopSetupMap = null; // cleanup for the Leaflet setup map instance
 
     const cleanup = () => {
         disposed = true;
+        if (stopSetupMap) { stopSetupMap(); stopSetupMap = null; }
         if (stopActive) stopActive();
+    };
+
+    /**
+     * Purpose: Build a reusable "Reset 15-Min Device Cooldowns" button calling the protected endpoint.
+     * Inputs:  extraCls (string) optional button CSS modifiers.
+     * Outputs: HTMLButtonElement.
+     */
+    const buildResetCooldownsButton = (extraCls = 'block') => {
+        const btn = button('Reset 15-Min Device Cooldowns', { cls: `ghost ${extraCls}`.trim(), iconName: 'refresh' });
+        btn.addEventListener('click', () => withLoading(btn, async () => {
+            const res = await api.post('/api/attendance/reset-cooldowns');
+            toast(res.message || 'All 15-minute device cooldowns have been reset. Students can re-scan immediately.', 'success', 3800);
+        }));
+        return btn;
     };
 
     const showSetup = async () => {
         if (stopActive) { stopActive(); stopActive = null; }
+        if (stopSetupMap) { stopSetupMap(); stopSetupMap = null; }
         mount(container, el('div', { class: 'card' }, el('span', { class: 'spinner' })));
         let sessions = [];
-        let net = { ip: '', source: '' };
         try {
-            [sessions, net] = await Promise.all([
-                api.get('/api/attendance/sessions').then((r) => r.sessions),
-                api.get('/api/network-info'),
-            ]);
+            sessions = await api.get('/api/attendance/sessions').then((r) => r.sessions);
         } catch (err) {
             toast(err.message, 'error');
         }
@@ -314,31 +304,87 @@ function renderLiveAttendanceTab(container, ctx) {
         const latInput = el('input', { type: 'text', value: '32.104400', placeholder: 'e.g. 32.104400', name: 'classroom_lat' });
         const lngInput = el('input', { type: 'text', value: '35.207800', placeholder: 'e.g. 35.207800', name: 'classroom_lng' });
         const enforce = el('input', { type: 'checkbox', checked: true, name: 'enforce_geofence' });
-        const detectGpsBtn = button('Use browser GPS', { cls: 'sm', iconName: 'wifi' });
+        const detectGpsBtn = button('Use My Current Location', { cls: 'sm primary', iconName: 'wifi' });
         const presetGpsBtn = button('Ariel Campus preset', { cls: 'sm ghost' });
+        const resetCooldownSetupBtn = buildResetCooldownsButton('sm');
         const start = button('Start attendance session', { cls: 'primary lg block', type: 'submit', iconName: 'play' });
+
+        /* ----- Radius selector pills (30m / 50m / 100m) ----- */
+        const RADIUS_OPTIONS = [30, 50, 100];
+        let mapInstance = null;
+        let mapMarker = null;
+        let mapCircle = null;
+
+        const pillButtons = RADIUS_OPTIONS.map((r) => {
+            const pill = el('button', {
+                type: 'button',
+                class: `radius-pill ${r === 100 ? 'active' : ''}`.trim(),
+                'data-radius': String(r),
+            }, `${r}m`);
+            pill.addEventListener('click', () => setRadiusMeters(r));
+            return pill;
+        });
+
+        const setRadiusMeters = (r) => {
+            const radiusVal = Math.max(30, Math.min(500, Number(r) || 100));
+            radiusInput.value = String(radiusVal);
+            for (const pill of pillButtons) {
+                pill.classList.toggle('active', Number(pill.dataset.radius) === radiusVal);
+            }
+            if (mapCircle) {
+                mapCircle.setRadius(radiusVal);
+            }
+        };
+
+        const setPinCoordinates = (lat, lng, recenter = true) => {
+            const safeLat = Number(lat);
+            const safeLng = Number(lng);
+            if (!Number.isFinite(safeLat) || !Number.isFinite(safeLng)) return;
+            latInput.value = safeLat.toFixed(6);
+            lngInput.value = safeLng.toFixed(6);
+            if (mapMarker) mapMarker.setLatLng([safeLat, safeLng]);
+            if (mapCircle) mapCircle.setLatLng([safeLat, safeLng]);
+            if (mapInstance && recenter) {
+                mapInstance.setView([safeLat, safeLng], Math.max(mapInstance.getZoom(), 17));
+            }
+        };
+
+        radiusInput.addEventListener('input', () => setRadiusMeters(Number(radiusInput.value)));
+        const onManualCoordInput = () => {
+            const parsedLat = Number(latInput.value.trim());
+            const parsedLng = Number(lngInput.value.trim());
+            if (Number.isFinite(parsedLat) && Number.isFinite(parsedLng)) {
+                setPinCoordinates(parsedLat, parsedLng, true);
+            }
+        };
+        latInput.addEventListener('change', onManualCoordInput);
+        lngInput.addEventListener('change', onManualCoordInput);
 
         detectGpsBtn.addEventListener('click', () => {
             if (!navigator.geolocation) {
-                toast('Browser Geolocation is not available; enter coordinates manually.', 'warning');
+                toast('Browser Geolocation is not available; click on the map or enter coordinates manually.', 'warning');
                 return;
             }
             navigator.geolocation.getCurrentPosition(
                 (pos) => {
-                    latInput.value = pos.coords.latitude.toFixed(6);
-                    lngInput.value = pos.coords.longitude.toFixed(6);
+                    setPinCoordinates(pos.coords.latitude, pos.coords.longitude, true);
                     toast(`Captured classroom GPS (${latInput.value}, ${lngInput.value}).`, 'success');
                 },
                 (err) => {
-                    toast(`Could not read browser GPS (${err.message}). Using manual coordinate fallback.`, 'warning');
+                    toast(`Could not read browser GPS (${err.message}). Click on the map to place the pin manually.`, 'warning');
                 },
                 { enableHighAccuracy: true, timeout: 8000 },
             );
         });
         presetGpsBtn.addEventListener('click', () => {
-            latInput.value = '32.104400';
-            lngInput.value = '35.207800';
+            setPinCoordinates(32.104400, 35.207800, true);
             toast('Applied Ariel University lecture hall coordinates.', 'info', 2200);
+        });
+
+        const mapHost = el('div', {
+            class: 'geofence-map-container',
+            id: 'lecturer-geofence-map',
+            'aria-label': 'Interactive classroom geofence map',
         });
 
         const form = el('form', { class: 'stack' }, [
@@ -352,7 +398,6 @@ function renderLiveAttendanceTab(container, ctx) {
                 el('label', { class: 'field' }, ['Classroom Lng', lngInput]),
                 el('label', { class: 'field' }, ['Geofence Radius (m)', radiusInput]),
             ]),
-            el('div', { class: 'row' }, [detectGpsBtn, presetGpsBtn]),
             el('label', { class: 'switch' }, [
                 enforce, el('span', { class: 'track' }),
                 el('span', { class: 'switch-text' }, [
@@ -388,13 +433,90 @@ function renderLiveAttendanceTab(container, ctx) {
             el('div', { class: 'card stack' }, [
                 el('div', { class: 'card-title' }, [el('span', { html: icon('qr') }), el('h2', {}, 'Start a lesson')]),
                 form,
+                el('div', { class: 'row', style: 'padding-top:0.4rem;border-top:1px solid var(--border)' }, [
+                    resetCooldownSetupBtn,
+                ]),
             ]),
             el('div', { class: 'card stack' }, [
-                el('div', { class: 'card-title' }, [el('span', { html: icon('shield') }), el('h2', {}, 'GPS Geofencing (Haversine)')]),
-                el('p', { class: 'muted' }, 'Unlike Wi-Fi IP checks—which fail when university networks use multi-IP NAT or when students use 4G/5G—GPS Geofencing verifies physical classroom proximity directly in meters.'),
+                el('div', { class: 'card-title' }, [el('span', { html: icon('shield') }), el('h2', {}, 'Interactive Classroom Geofence Map')]),
+                el('div', { class: 'row' }, [
+                    detectGpsBtn,
+                    presetGpsBtn,
+                    el('span', { class: 'spacer' }),
+                    el('div', { class: 'radius-pills', role: 'group', 'aria-label': 'Geofence radius selector' }, pillButtons),
+                ]),
+                mapHost,
+                el('p', { class: 'faint' }, 'Click anywhere on the map or drag the pin to position the classroom. The translucent blue/cyan circle previews the exact 30m / 50m / 100m geofence boundary enforced on student phones.'),
                 el('div', { class: 'banner info' }, [el('span', { html: icon('info') }), el('span', {}, 'Browser Geolocation requires HTTPS (provided automatically by Cloudflare Tunnel and Render) or localhost.')]),
             ]),
         ]));
+
+        /* ----- Initialize Leaflet.js + OpenStreetMap Map & Live Circle ----- */
+        if (typeof window !== 'undefined' && window.L) {
+            const L = window.L;
+            const initialLat = Number(latInput.value) || 32.104400;
+            const initialLng = Number(lngInput.value) || 35.207800;
+            const initialRadius = Number(radiusInput.value) || 100;
+
+            mapInstance = L.map(mapHost, {
+                center: [initialLat, initialLng],
+                zoom: 17,
+                zoomControl: true,
+            });
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '&copy; OpenStreetMap contributors',
+            }).addTo(mapInstance);
+
+            mapMarker = L.marker([initialLat, initialLng], { draggable: true }).addTo(mapInstance);
+            mapCircle = L.circle([initialLat, initialLng], {
+                radius: initialRadius,
+                color: '#22d3ee',
+                fillColor: '#7c8cff',
+                fillOpacity: 0.22,
+                weight: 2,
+            }).addTo(mapInstance);
+
+            mapInstance.on('click', (e) => {
+                setPinCoordinates(e.latlng.lat, e.latlng.lng, false);
+            });
+            mapMarker.on('drag', (e) => {
+                const pos = e.target.getLatLng();
+                if (mapCircle) mapCircle.setLatLng(pos);
+                latInput.value = pos.lat.toFixed(6);
+                lngInput.value = pos.lng.toFixed(6);
+            });
+            mapMarker.on('dragend', (e) => {
+                const pos = e.target.getLatLng();
+                setPinCoordinates(pos.lat, pos.lng, false);
+            });
+
+            // Important Leaflet fix: call map.invalidateSize() whenever the tab/panel becomes visible
+            // so OpenStreetMap tiles never render half-gray.
+            const refreshMapSize = () => {
+                if (mapInstance && !disposed) {
+                    mapInstance.invalidateSize();
+                }
+            };
+            requestAnimationFrame(refreshMapSize);
+            const t1 = setTimeout(refreshMapSize, 120);
+            const t2 = setTimeout(refreshMapSize, 350);
+            let resizeObs = null;
+            if (typeof ResizeObserver !== 'undefined') {
+                resizeObs = new ResizeObserver(() => refreshMapSize());
+                resizeObs.observe(mapHost);
+            }
+
+            stopSetupMap = () => {
+                clearTimeout(t1);
+                clearTimeout(t2);
+                if (resizeObs) resizeObs.disconnect();
+                if (mapInstance) {
+                    mapInstance.remove();
+                    mapInstance = null;
+                }
+            };
+        }
     };
 
     /**
@@ -403,6 +525,7 @@ function renderLiveAttendanceTab(container, ctx) {
      * Outputs: void (registers cleanup in `stopActive`).
      */
     const showActive = (session, ipWarning) => {
+        if (stopSetupMap) { stopSetupMap(); stopSetupMap = null; }
         if (stopActive) stopActive();
         const lessonId = session.lesson_id;
         const mainQr = buildQrDisplay();
@@ -557,6 +680,8 @@ function renderLiveAttendanceTab(container, ctx) {
             }
         });
 
+        const resetCooldownActiveBtn = buildResetCooldownsButton('block');
+
         let confirmTimer = 0;
         const closeBtn = button('Close session', { cls: 'danger block', iconName: 'stop' });
         closeBtn.addEventListener('click', () => {
@@ -606,6 +731,7 @@ function renderLiveAttendanceTab(container, ctx) {
                         enforceInput, el('span', { class: 'track' }),
                         el('span', { class: 'switch-text' }, [el('strong', {}, 'Enforce GPS Geofencing'), el('span', { class: 'faint' }, coordsLabel)]),
                     ]),
+                    resetCooldownActiveBtn,
                     closeBtn,
                 ]),
             ]),
@@ -899,6 +1025,13 @@ function renderRosterAndHeadcountTab(container, ctx) {
         toast(`YOLO detected ${latestYoloReport.detected_count} persons on p3.jpeg (${latestYoloReport.status_color}).`, 'success');
     }));
 
+    const syncRosterBtn = button('Sync from Course Excel', { cls: 'sm', iconName: 'refresh' });
+    syncRosterBtn.addEventListener('click', () => withLoading(syncRosterBtn, async () => {
+        const result = await api.post('/api/roster/import?use_default_asset=true');
+        toast(`Synced ${result.total_imported} students from courseid_130158_participants.xlsx.`, 'success');
+        await loadLessonReport(activeLessonId);
+    }));
+
     mount(container, el('div', { class: 'stack' }, [
         el('div', { class: 'grid grid-stats' }, [presentStat.node, absentStat.node, yoloStat.node, statusStat.node]),
         el('div', { class: 'card stack' }, [
@@ -922,6 +1055,7 @@ function renderRosterAndHeadcountTab(container, ctx) {
                     el('h2', {}, 'Student Roster & Per-Lesson Attendance Management'),
                 ]),
                 el('span', { class: 'spacer' }),
+                syncRosterBtn,
                 button('Export CSV (.csv)', { cls: 'sm', iconName: 'download', onclick: () => downloadExport('csv') }),
                 button('Export Excel (.xlsx)', { cls: 'sm primary', iconName: 'download', onclick: () => downloadExport('xlsx') }),
             ]),

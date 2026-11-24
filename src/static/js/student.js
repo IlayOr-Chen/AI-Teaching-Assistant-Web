@@ -99,7 +99,7 @@ export async function renderStudentCheckin(root, { lessonId, qrToken }) {
     };
     requestStudentGps();
 
-    const search = el('input', { type: 'search', placeholder: 'Type your name…', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', 'aria-label': 'Search your name', dir: 'auto' });
+    const search = el('input', { type: 'search', placeholder: 'Type your name or email…', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', 'aria-label': 'Search your name or email', dir: 'auto' });
     const list = el('div', { class: 'combo-list', role: 'listbox' });
     const pickerHost = el('div', { class: 'stack' });
     const submit = button('Check me in', { cls: 'primary lg block', iconName: 'check' });
@@ -108,11 +108,20 @@ export async function renderStudentCheckin(root, { lessonId, qrToken }) {
 
     const renderList = () => {
         const q = search.value.trim();
-        const matches = (q ? students.filter((s) => s.full_name.toLowerCase().includes(q.toLowerCase())) : students).slice(0, 60);
+        const qLower = q.toLowerCase();
+        const matches = (q
+            ? students.filter((s) => (s.full_name || '').toLowerCase().includes(qLower) || (s.email || '').toLowerCase().includes(qLower))
+            : students).slice(0, 60);
         const nodes = matches.map((s) => el('button', {
             class: 'combo-option', type: 'button', role: 'option', onclick: () => choose(s),
-        }, [el('span', { class: 'avatar feed-avatar', html: icon('user') }), el('span', { dir: 'auto' }, highlight(s.full_name, q))]));
-        if (!nodes.length) nodes.push(el('div', { class: 'empty', style: 'border:0' }, 'No matching name. Check the spelling or ask your lecturer.'));
+        }, [
+            el('span', { class: 'avatar feed-avatar', html: icon('user') }),
+            el('div', { class: 'combo-meta' }, [
+                el('span', { class: 'combo-name', dir: 'auto' }, highlight(s.full_name, q)),
+                s.email ? el('span', { class: 'combo-email', dir: 'ltr' }, highlight(s.email, q)) : null,
+            ]),
+        ]));
+        if (!nodes.length) nodes.push(el('div', { class: 'empty', style: 'border:0' }, 'No matching name or email. Check the spelling or ask your lecturer.'));
         else if (!q && students.length > 60) nodes.push(el('div', { class: 'faint center', style: 'padding:0.6rem' }, `Showing 60 of ${students.length} — type to narrow down.`));
         mount(list, nodes);
     };
@@ -133,7 +142,10 @@ export async function renderStudentCheckin(root, { lessonId, qrToken }) {
         inlineError.classList.add('hidden');
         mount(pickerHost, el('div', { class: 'selected-chip' }, [
             el('span', { html: icon('check', 'lg') }),
-            el('strong', { dir: 'auto' }, student.full_name),
+            el('div', { class: 'combo-meta', style: 'flex:1' }, [
+                el('strong', { class: 'combo-name', dir: 'auto' }, student.full_name),
+                student.email ? el('span', { class: 'combo-email', dir: 'ltr' }, student.email) : null,
+            ]),
             button('Change', { cls: 'sm ghost', onclick: () => { search.value = ''; showPicker(); search.focus(); } }),
         ]));
     };
