@@ -508,9 +508,9 @@ class AttendanceManager:
     ) -> dict[str, Any] | None:
         """
         Purpose:
-            Inspect `/device_cooldowns/{device_id}` in Firebase RTDB and enforce the
-            strict 15-minute cooldown per device so a student cannot immediately check in
-            again under a friend's name.
+            Inspect `/device_cooldowns/{device_id}` and `/settings/cooldown_reset_at`
+            in Firebase RTDB as the source of truth to enforce the 15-minute cooldown
+            per device, while allowing immediate unblocking after a Lecturer cooldown reset.
         Inputs:
             device_id (str): Verified device identifier from the signed device cookie.
             now_ts (int | None): Optional current UNIX timestamp for deterministic testing.
@@ -525,9 +525,13 @@ class AttendanceManager:
         if not isinstance(record, dict):
             return None
 
+        last_checkin_at = int(record.get("last_checkin_at", 0))
+        reset_at = self.repository.get("/settings/cooldown_reset_at")
+        if isinstance(reset_at, (int, float)) and last_checkin_at <= int(reset_at):
+            return None
+
         current_ts = int(now_ts) if now_ts is not None else int(time.time())
         cooldown_seconds = self.config.device_cooldown_minutes * 60
-        last_checkin_at = int(record.get("last_checkin_at", 0))
         elapsed = current_ts - last_checkin_at
 
         # Cooldown math: block if elapsed seconds since last device check-in < 15 * 60 (900s)
@@ -539,6 +543,27 @@ class AttendanceManager:
                 f"Remaining cooldown: {mins}m {secs:02d}s ({remaining_seconds} seconds)."
             )
         return None
+
+    def reset_all_device_cooldowns(
+        self, now_ts: int | None = None
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Lecturer control to clear all active 15-minute device cooldown records
+            under `/device_cooldowns` in Firebase RTDB and record `/settings/cooldown_reset_at`,
+            immediately unblocking any smartphone even if it still carries an active cookie.
+        Inputs:
+            now_ts (int | None): Optional UNIX timestamp override for deterministic tests.
+        Outputs:
+            dict[str, Any]: Confirmation dictionary with `status` and `cooldown_reset_at`.
+        """
+        reset_ts = int(now_ts) if now_ts is not None else int(time.time())
+        self.repository.delete("/device_cooldowns")
+        self.repository.set("/settings/cooldown_reset_at", reset_ts)
+        return {
+            "status": "cooldowns_reset",
+            "cooldown_reset_at": reset_ts,
+        }
 
     def record_device_cooldown(
         self,

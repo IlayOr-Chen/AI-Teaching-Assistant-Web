@@ -375,6 +375,14 @@ def create_app(
     fastapi_app.state.video_summarizer = video_summarizer
     fastapi_app.state.homework_reviewer = homework_reviewer
 
+    # Seed the fixed lecturer account (adminL@gmail.com / 12345) and auto-load the
+    # 104-student Hebrew course roster from assets/courseid_130158_participants.xlsx if empty
+    try:
+        auth_service.seed_default_lecturer()
+        roster_importer.ensure_roster_seeded(DEFAULT_ROSTER_ASSET)
+    except Exception:
+        pass
+
     if STATIC_DIR.is_dir():
         fastapi_app.mount(
             "/static", StaticFiles(directory=str(STATIC_DIR)), name="static"
@@ -433,46 +441,24 @@ def create_app(
         return ClientIPResolver.resolve_with_source(request)
 
     @fastapi_app.post("/api/auth/lecturer/register", response_class=JSONResponse)
-    async def register_lecturer_endpoint(
-        payload: LecturerRegisterRequest, response: Response, request: Request
-    ) -> dict[str, Any]:
+    @fastapi_app.post("/api/auth/register", response_class=JSONResponse)
+    async def register_lecturer_endpoint() -> dict[str, Any]:
         """
         Purpose:
-            Register a new Lecturer account protected by `LECTURER_ACCESS_CODE`
-            and set an HTTP-only signed JWT cookie (`ta_lecturer_session`).
+            Block public lecturer self-registration. Allowed lecturer accounts are
+            strictly configured via `.env` / `AppConfig` and seeded on startup.
         Inputs:
-            payload (LecturerRegisterRequest): Registration form data.
-            response (Response): FastAPI HTTP response object used to set cookies.
-            request (Request): Incoming FastAPI HTTP request.
+            None.
         Outputs:
-            dict[str, Any]: Registered lecturer profile and JWT token.
+            Raises HTTP 403 Forbidden.
         """
-        svc: AuthService = request.app.state.auth_service
-        cfg: AppConfig = request.app.state.config
-        try:
-            result = svc.register_lecturer(
-                full_name=payload.full_name,
-                email=payload.email,
-                password=payload.password,
-                access_code=payload.access_code,
-            )
-        except PermissionError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)
-            ) from exc
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
-            ) from exc
-
-        response.set_cookie(
-            key=LECTURER_COOKIE_NAME,
-            value=result["token"],
-            httponly=True,
-            samesite="lax",
-            max_age=cfg.jwt_expiration_hours * 3600,
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Public lecturer self-registration is disabled. "
+                "Please sign in using the configured lecturer account."
+            ),
         )
-        return result
 
     @fastapi_app.post("/api/auth/lecturer/login", response_class=JSONResponse)
     async def login_lecturer_endpoint(
@@ -761,7 +747,11 @@ def create_app(
             ) from exc
 
         names = [
-            {"student_id": stu["student_id"], "full_name": stu.get("full_name", "")}
+            {
+                "student_id": stu["student_id"],
+                "full_name": stu.get("full_name", ""),
+                "email": stu.get("email", ""),
+            }
             for stu in importer.list_students()
         ]
         has_coords = (
@@ -939,6 +929,24 @@ def create_app(
             max_age=cfg.device_cooldown_minutes * 60,
         )
         return result
+
+    @fastapi_app.post("/api/attendance/reset-cooldowns", response_class=JSONResponse)
+    async def reset_device_cooldowns_endpoint(request: Request) -> dict[str, Any]:
+        """
+        Purpose:
+            Lecturer-protected endpoint that clears all `/device_cooldowns` records
+            in Firebase RTDB and updates `/settings/cooldown_reset_at` so any device
+            (even one still holding an active cooldown cookie) is immediately unblocked.
+        Inputs:
+            request (Request): Incoming FastAPI request (requires Lecturer JWT).
+        Outputs:
+            dict[str, Any]: Confirmation dictionary with `status` and `cooldown_reset_at`.
+        """
+        svc: AuthService = request.app.state.auth_service
+        svc.require_lecturer_claims(request)
+
+        mgr: AttendanceManager = request.app.state.attendance_manager
+        return mgr.reset_all_device_cooldowns()
 
     @fastapi_app.post(
         "/api/attendance/sessions/{lesson_id}/manual", response_class=JSONResponse

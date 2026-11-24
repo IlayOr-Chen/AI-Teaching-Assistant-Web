@@ -42,12 +42,10 @@ def _setup_authenticated_lecturer_client() -> TestClient:
     client = TestClient(create_app(config=cfg, repository=repo))
 
     reg = client.post(
-        "/api/auth/lecturer/register",
+        "/api/auth/lecturer/login",
         json={
-            "full_name": "Prof. Boaz",
-            "email": "boaz@ariel.ac.il",
-            "password": "StrongPassword2026",
-            "access_code": "TA-ADMIN-2026",
+            "email": "adminL@gmail.com",
+            "password": "12345",
         },
     )
     assert reg.status_code == 200

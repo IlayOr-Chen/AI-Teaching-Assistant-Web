@@ -349,3 +349,30 @@ class RosterImporter:
             return None
         record = self.repository.get(f"/students/{student_id.strip()}")
         return record if isinstance(record, dict) else None
+
+    def ensure_roster_seeded(self, default_asset_path: str | Path) -> dict[str, Any]:
+        """
+        Purpose:
+            Automatically load and seed the Hebrew student roster from
+            `assets/courseid_130158_participants.xlsx` into Firebase RTDB (`/students`)
+            on server startup if `/students` is currently empty.
+        Inputs:
+            default_asset_path (str | Path): Path to the bundled course `.xlsx` file.
+        Outputs:
+            dict[str, Any]: Dictionary describing whether seeding occurred and total student count.
+        """
+        existing = self.repository.get("/students")
+        if isinstance(existing, dict) and len(existing) > 0:
+            return {"seeded": False, "total_students": len(existing)}
+
+        path_obj = Path(default_asset_path)
+        if not path_obj.is_file():
+            return {"seeded": False, "total_students": 0}
+
+        summary = self.import_from_excel(path_obj, replace_existing=True)
+        return {
+            "seeded": True,
+            "total_students": summary["total_imported"],
+            "unassigned_group_count": summary["unassigned_group_count"],
+        }
+

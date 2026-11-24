@@ -427,14 +427,12 @@ def test_attendance_http_endpoints_gps_geofence_and_cooldown_flow() -> None:
     test_app = create_app(config=cfg, repository=repo)
     lec_client = TestClient(test_app)
 
-    # 1. Lecturer registers and opens Lesson 1 with classroom GPS coordinates and 100m radius
+    # 1. Lecturer logs in with configured account and opens Lesson 1 with classroom GPS coordinates and 100m radius
     lec_client.post(
-        "/api/auth/lecturer/register",
+        "/api/auth/lecturer/login",
         json={
-            "full_name": "Prof. Boaz",
-            "email": "boaz@ariel.ac.il",
-            "password": "StrongPassword123",
-            "access_code": "TA-ADMIN-2026",
+            "email": "adminL@gmail.com",
+            "password": "12345",
         },
     )
     start_res = lec_client.post(
@@ -533,3 +531,219 @@ def test_attendance_http_endpoints_gps_geofence_and_cooldown_flow() -> None:
     assert bypass_success.status_code == 200
     assert bypass_success.json()["record"]["student_id"] == "stu_2"
     assert bypass_success.json()["record"]["geofence_status"] == "bypassed"
+
+
+def test_reset_device_cooldowns_immediately_unblocks_cookie_holder() -> None:
+    """
+    Purpose:
+        Verify that calling `POST /api/attendance/reset-cooldowns` clears
+        `/device_cooldowns` in Firebase RTDB and stores `cooldown_reset_at`,
+        immediately unblocking a smartphone that still holds an active local
+        `ta_device_id` cooldown cookie.
+    Inputs:
+        None.
+    Outputs:
+        None.
+    """
+    cfg = AppConfig(
+        use_mock_firebase=True,
+        jwt_secret="cooldown-reset-endpoint-test-secret-key-32-bytes",
+    )
+    repo = FirebaseRepository(use_mock=True)
+    repo.set(
+        "/students",
+        {
+            "stu_1": {
+                "student_id": "stu_1",
+                "full_name": "גיא אביב",
+                "email": "guygg197@gmail.com",
+                "group": "3",
+            },
+            "stu_2": {
+                "student_id": "stu_2",
+                "full_name": "ליאל אבידור",
+                "email": "avidorliel@gmail.com",
+                "group": "1",
+            },
+        },
+    )
+    app = create_app(config=cfg, repository=repo)
+    lec_client = TestClient(app)
+    phone_client = TestClient(app)
+
+    # Unauthenticated or student callers cannot reset cooldowns
+    assert phone_client.post("/api/attendance/reset-cooldowns").status_code == 401
+
+    # Lecturer signs in and starts Lesson 1
+    login_res = lec_client.post(
+        "/api/auth/lecturer/login",
+        json={"email": "adminL@gmail.com", "password": "12345"},
+    )
+    assert login_res.status_code == 200
+
+    lec_client.post(
+        "/api/attendance/sessions",
+        json={
+            "lesson_id": "lesson_1",
+            "lesson_title": "Lesson 1",
+            "classroom_lat": CLASSROOM_LAT,
+            "classroom_lng": CLASSROOM_LNG,
+            "geofence_radius_meters": 100,
+            "enforce_geofence": True,
+        },
+    )
+    qr_token = lec_client.get("/api/attendance/sessions/lesson_1/qr").json()["qr_token"]
+
+    # 1. Phone checks in Student 1 -> receives active ta_device_id cookie
+    first = phone_client.post(
+        "/api/attendance/checkin",
+        json={
+            "lesson_id": "lesson_1",
+            "student_id": "stu_1",
+            "qr_token": qr_token,
+            "student_lat": INSIDE_RADIUS_LAT,
+            "student_lng": INSIDE_RADIUS_LNG,
+        },
+    )
+    assert first.status_code == 200
+    assert DEVICE_COOKIE_NAME in first.cookies
+
+    # 2. Same phone (holding ta_device_id cookie) tries to check in Student 2 -> blocked (403)
+    blocked = phone_client.post(
+        "/api/attendance/checkin",
+        json={
+            "lesson_id": "lesson_1",
+            "student_id": "stu_2",
+            "qr_token": qr_token,
+            "student_lat": INSIDE_RADIUS_LAT,
+            "student_lng": INSIDE_RADIUS_LNG,
+        },
+    )
+    assert blocked.status_code == 403
+    assert "15-minute device cooldown active" in blocked.json()["detail"]
+
+    # 3. Lecturer clicks "Reset 15-Min Device Cooldowns"
+    reset_res = lec_client.post("/api/attendance/reset-cooldowns")
+    assert reset_res.status_code == 200
+    assert reset_res.json()["status"] == "cooldowns_reset"
+    assert repo.get("/device_cooldowns") is None
+    assert isinstance(repo.get("/settings/cooldown_reset_at"), int)
+
+    # 4. Same phone (STILL holding the active ta_device_id cookie!) retries immediately -> succeeds!
+    unblocked = phone_client.post(
+        "/api/attendance/checkin",
+        json={
+            "lesson_id": "lesson_1",
+            "student_id": "stu_2",
+            "qr_token": qr_token,
+            "student_lat": INSIDE_RADIUS_LAT,
+            "student_lng": INSIDE_RADIUS_LNG,
+        },
+    )
+    assert unblocked.status_code == 200
+    assert unblocked.json()["record"]["student_id"] == "stu_2"
+
+
+@pytest.mark.parametrize(
+    ("radius_meters", "inside_lat", "outside_lat"),
+    [
+        (30, 32.10455, 32.10480),   # ~17m inside vs ~45m outside 30m
+        (50, 32.10470, 32.10505),   # ~33m inside vs ~72m outside 50m
+        (100, 32.10500, 32.10600),  # ~67m inside vs ~178m outside 100m
+    ],
+)
+def test_strict_geofence_radii_30m_50m_100m_enforcement(
+    radius_meters: int, inside_lat: float, outside_lat: float
+) -> None:
+    """
+    Purpose:
+        Verify strict Haversine geofence enforcement for each interactive map radius
+        option (`30m`, `50m`, `100m`): students outside the chosen radius (or missing
+        GPS coordinates) are rejected with HTTP 403 and NOT marked present, while
+        students inside the chosen radius are verified and marked present.
+    Inputs:
+        radius_meters (int): Selected geofence radius (`30`, `50`, or `100`).
+        inside_lat (float): Student latitude inside `radius_meters`.
+        outside_lat (float): Student latitude outside `radius_meters`.
+    Outputs:
+        None.
+    """
+    cfg = AppConfig(
+        use_mock_firebase=True,
+        jwt_secret="strict-geofence-radius-test-secret-key-32-bytes",
+    )
+    repo = FirebaseRepository(use_mock=True)
+    repo.set(
+        "/students",
+        {
+            "stu_in": {
+                "student_id": "stu_in",
+                "full_name": "Student Inside",
+                "email": "inside@ariel.ac.il",
+                "group": "1",
+            },
+            "stu_out": {
+                "student_id": "stu_out",
+                "full_name": "Student Outside",
+                "email": "outside@ariel.ac.il",
+                "group": "1",
+            },
+        },
+    )
+    app = create_app(config=cfg, repository=repo)
+    lec_client = TestClient(app)
+    lec_client.post(
+        "/api/auth/lecturer/login",
+        json={"email": "adminL@gmail.com", "password": "12345"},
+    )
+
+    lesson_id = f"lesson_r{radius_meters}"
+    lec_client.post(
+        "/api/attendance/sessions",
+        json={
+            "lesson_id": lesson_id,
+            "lesson_title": f"Lesson {radius_meters}m",
+            "classroom_lat": CLASSROOM_LAT,
+            "classroom_lng": CLASSROOM_LNG,
+            "geofence_radius_meters": radius_meters,
+            "enforce_geofence": True,
+        },
+    )
+    qr_token = lec_client.get(f"/api/attendance/sessions/{lesson_id}/qr").json()["qr_token"]
+
+    # 1. Student outside the selected radius -> rejected with 403 and not marked present
+    phone_out = TestClient(app)
+    out_res = phone_out.post(
+        "/api/attendance/checkin",
+        json={
+            "lesson_id": lesson_id,
+            "student_id": "stu_out",
+            "qr_token": qr_token,
+            "student_lat": outside_lat,
+            "student_lng": CLASSROOM_LNG,
+        },
+    )
+    assert out_res.status_code == 403
+    assert f"(allowed: {radius_meters}m)" in out_res.json()["detail"]
+
+    report_after_reject = lec_client.get(f"/api/attendance/sessions/{lesson_id}").json()
+    assert report_after_reject["present_count"] == 0
+
+    # 2. Student inside the selected radius -> accepted (200) and marked present
+    phone_in = TestClient(app)
+    in_res = phone_in.post(
+        "/api/attendance/checkin",
+        json={
+            "lesson_id": lesson_id,
+            "student_id": "stu_in",
+            "qr_token": qr_token,
+            "student_lat": inside_lat,
+            "student_lng": CLASSROOM_LNG,
+        },
+    )
+    assert in_res.status_code == 200
+    assert in_res.json()["record"]["geofence_status"] == "verified"
+    assert in_res.json()["record"]["distance_meters"] <= radius_meters
+
+    report_after_accept = lec_client.get(f"/api/attendance/sessions/{lesson_id}").json()
+    assert report_after_accept["present_count"] == 1

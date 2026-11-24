@@ -51,15 +51,17 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
     Outputs:
         None.
     """
-    # 1. Root HTML shell
+    # 1. Root HTML shell + Leaflet.js CDN
     root_res = ui_client.get("/")
     assert root_res.status_code == 200
     assert "text/html" in root_res.headers.get("content-type", "")
     assert '/static/css/styles.css' in root_res.text
     assert '/static/js/app.js' in root_res.text
     assert 'id="app"' in root_res.text
+    assert 'leaflet@1.9.4/dist/leaflet.css' in root_res.text
+    assert 'leaflet@1.9.4/dist/leaflet.js' in root_res.text
 
-    # 2. Design system stylesheet (animations, QR ring, tabs, toast notifications, mobile-first layout)
+    # 2. Design system stylesheet (animations, QR ring, tabs, toast notifications, mobile-first layout, Leaflet map)
     css_res = ui_client.get("/static/css/styles.css")
     assert css_res.status_code == 200
     assert "text/css" in css_res.headers.get("content-type", "")
@@ -72,14 +74,27 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
         ".toast",
         ".checkin-shell",
         ".projector-overlay",
+        ".geofence-map-container",
+        ".radius-pills",
+        ".radius-pill",
+        ".combo-email",
     ):
         assert expected_selector in css_res.text, f"Missing CSS rule: {expected_selector}"
 
     # 3. ES module JavaScript files
     js_files = {
         "/static/js/app.js": ["renderLecturerDashboard", "renderStudentPortal", "renderStudentCheckin"],
-        "/static/js/lecturer.js": ["renderLecturerAuth", "renderLecturerDashboard", "buildQrDisplay"],
-        "/static/js/student.js": ["renderStudentCheckin", "renderStudentLogin", "renderStudentPortal"],
+        "/static/js/lecturer.js": [
+            "renderLecturerAuth",
+            "renderLecturerDashboard",
+            "buildQrDisplay",
+            "Sync from Course Excel",
+            "Reset 15-Min Device Cooldowns",
+            "Use My Current Location",
+            "RADIUS_OPTIONS = [30, 50, 100]",
+            "invalidateSize()",
+        ],
+        "/static/js/student.js": ["renderStudentCheckin", "renderStudentLogin", "renderStudentPortal", "combo-email"],
         "/static/js/ui.js": ["toast", "createTabs", "pageShell", "withLoading"],
         "/static/js/api.js": ["ApiError", "export const api"],
         "/static/js/icons.js": ["export function icon"],
@@ -91,3 +106,7 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
         assert "javascript" in content_type, f"Unexpected content-type for {path}: {content_type}"
         for token in expected_tokens:
             assert token in res.text, f"Expected '{token}' in {path}"
+    # Confirm public lecturer self-registration UI was removed from lecturer.js
+    lec_js = ui_client.get("/static/js/lecturer.js").text
+    assert "Create lecturer account" not in lec_js
+    assert "/api/auth/lecturer/register" not in lec_js

@@ -74,19 +74,18 @@ def _make_client(config: AppConfig | None = None) -> tuple[TestClient, FirebaseR
 def _register_lecturer(client: TestClient) -> None:
     """
     Purpose:
-        Register a lecturer so the client carries a lecturer session cookie.
+        Authenticate the configured demo lecturer (`adminL@gmail.com` / `12345`)
+        so the client carries a lecturer session cookie.
     Inputs:
         client (TestClient): Client to authenticate.
     Outputs:
         None.
     """
     res = client.post(
-        "/api/auth/lecturer/register",
+        "/api/auth/lecturer/login",
         json={
-            "full_name": "Prof. Test",
-            "email": "prof@ariel.ac.il",
-            "password": "password123",
-            "access_code": "CODE-1",
+            "email": "adminL@gmail.com",
+            "password": "12345",
         },
     )
     assert res.status_code == 200
@@ -175,8 +174,10 @@ def test_roster_and_attendance_reports_are_lecturer_only() -> None:
 def test_checkin_context_is_qr_gated_and_hides_emails() -> None:
     """
     Purpose:
-        Verify `/api/attendance/checkin-context` only returns names and geofence context
-        for a valid, unexpired token of an open session and never leaks emails or groups.
+        Verify `/api/attendance/checkin-context` is strictly QR-gated (only returns
+        student dropdown options and geofence context for a valid, unexpired token
+        of an open session) and returns `{"student_id", "full_name", "email"}` for
+        each student so Hebrew names and emails render cleanly in the dropdown.
     Inputs:
         None.
     Outputs:
@@ -209,7 +210,7 @@ def test_checkin_context_is_qr_gated_and_hides_emails() -> None:
     assert body["has_classroom_coords"] is True
     assert [s["full_name"] for s in body["students"]] == ["Alice Cohen", "Bob Levi"]
     for student in body["students"]:
-        assert set(student) == {"student_id", "full_name"}
+        assert set(student) == {"student_id", "full_name", "email"}
 
     # Missing/garbage token -> 400, and no names leak
     bad = phone.get(

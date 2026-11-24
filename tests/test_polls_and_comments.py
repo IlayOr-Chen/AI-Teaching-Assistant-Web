@@ -237,12 +237,10 @@ def test_polls_and_comments_http_endpoints_and_ui_assets() -> None:
 
     # Authenticate Lecturer, Alice, and Bob
     lec_client.post(
-        "/api/auth/lecturer/register",
+        "/api/auth/lecturer/login",
         json={
-            "full_name": "Prof. Boaz",
-            "email": "boaz@ariel.ac.il",
-            "password": "StrongPassword2026",
-            "access_code": "TA-ADMIN-2026",
+            "email": "adminL@gmail.com",
+            "password": "12345",
         },
     )
     alice_client.post("/api/auth/student/login", json={"email": "alice@ariel.ac.il"})

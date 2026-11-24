@@ -30,7 +30,10 @@ class AppConfig:
         jwt_secret (str): Secret key used to sign and verify JWT cookies and QR tokens.
         jwt_algorithm (str): HMAC signing algorithm (default `HS256`).
         jwt_expiration_hours (int): Lecturer session token validity duration in hours.
-        lecturer_access_code (str): Shared access gate preventing unauthorized lecturer signups.
+        lecturer_email (str): Pre-configured lecturer login email (default `adminL@gmail.com`).
+        lecturer_password (str): Pre-configured lecturer login password (default `12345`).
+        lecturer_name (str): Display name for the seeded lecturer account.
+        lecturer_access_code (str): Shared access gate for programmatic lecturer setup.
         qr_rotation_seconds (int): UI rotation interval of each attendance QR token in seconds (default 8s).
         qr_grace_seconds (int): Extra server-side grace seconds after rotation (~15s total token validity).
         device_cooldown_minutes (int): Cooldown period in minutes enforced per student device (15m).
@@ -52,6 +55,9 @@ class AppConfig:
     jwt_secret: str = "dev-fallback-secret-key-change-in-production-2026"
     jwt_algorithm: str = "HS256"
     jwt_expiration_hours: int = 12
+    lecturer_email: str = "adminL@gmail.com"
+    lecturer_password: str = "12345"
+    lecturer_name: str = "Course Lecturer"
     lecturer_access_code: str = "TA-ADMIN-2026"
     qr_rotation_seconds: int = 8
     qr_grace_seconds: int = 7
@@ -101,6 +107,9 @@ class AppConfig:
             ).strip(),
             jwt_algorithm=os.getenv("JWT_ALGORITHM", "HS256").strip(),
             jwt_expiration_hours=int(os.getenv("JWT_EXPIRATION_HOURS", "12")),
+            lecturer_email=os.getenv("LECTURER_EMAIL", "adminL@gmail.com").strip(),
+            lecturer_password=os.getenv("LECTURER_PASSWORD", "12345").strip(),
+            lecturer_name=os.getenv("LECTURER_NAME", "Course Lecturer").strip(),
             lecturer_access_code=os.getenv("LECTURER_ACCESS_CODE", "TA-ADMIN-2026").strip(),
             qr_rotation_seconds=int(os.getenv("QR_ROTATION_SECONDS", "8")),
             qr_grace_seconds=int(os.getenv("QR_GRACE_SECONDS", "7")),

@@ -344,12 +344,10 @@ def test_gemini_video_and_homework_http_endpoints_and_ui_assets() -> None:
     stu_client = TestClient(app)
 
     lec_client.post(
-        "/api/auth/lecturer/register",
+        "/api/auth/lecturer/login",
         json={
-            "full_name": "Prof. Boaz",
-            "email": "boaz@ariel.ac.il",
-            "password": "StrongPassword2026",
-            "access_code": "TA-ADMIN-2026",
+            "email": "adminL@gmail.com",
+            "password": "12345",
         },
     )
     stu_client.post("/api/auth/student/login", json={"email": "alice@ariel.ac.il"})

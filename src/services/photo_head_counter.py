@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import io
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,8 @@ from PIL import Image, ImageDraw
 
 from src.config import AppConfig
 from src.repository.firebase_repository import FirebaseRepository
+
+os.environ.setdefault("YOLO_AUTOINSTALL", "False")
 
 PERSON_CLASS_ID = 0
 HIGH_CONF_BOX_THRESHOLD = 0.60

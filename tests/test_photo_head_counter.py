@@ -173,14 +173,12 @@ def test_photo_head_counter_error_handling_and_http_endpoint() -> None:
     test_app = create_app(config=cfg, repository=repo)
     client = TestClient(test_app)
 
-    # Register Lecturer
+    # Log in Lecturer (case-insensitive demo account)
     client.post(
-        "/api/auth/lecturer/register",
+        "/api/auth/lecturer/login",
         json={
-            "full_name": "Prof. Boaz",
-            "email": "boaz@ariel.ac.il",
-            "password": "StrongPassword2026",
-            "access_code": "TA-ADMIN-2026",
+            "email": "adminL@gmail.com",
+            "password": "12345",
         },
     )
 
