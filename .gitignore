@@ -153,7 +153,9 @@ activemq-data/
 .env
 .envrc
 .venv
+.venv/
 env/
+venv
 venv/
 ENV/
 env.bak/
@@ -218,3 +220,21 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project Secrets & Firebase Service Account Credentials
+.env
+.env.*
+!.env.example
+serviceAccountKey.json
+*firebase-adminsdk*.json
+
+# Runtime uploads & temporary generated files
+tmp/
+uploads/
+*.mp4
+*.pt
+*.onnx
+annotated_*.jpg
+annotated_*.jpeg
+annotated_*.png
+
