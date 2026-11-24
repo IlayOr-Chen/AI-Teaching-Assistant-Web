@@ -6,12 +6,13 @@ Inputs:
     None.
 Outputs:
     Exports `AuthService`, `RosterImporter`, `AttendanceManager`, `PhotoHeadCounter`,
-    and cookie constants.
+    `calculate_distance_meters`, and cookie constants.
 """
 
 from src.services.attendance_manager import (
     DEVICE_COOKIE_NAME,
     AttendanceManager,
+    calculate_distance_meters,
 )
 from src.services.auth_service import (
     LECTURER_COOKIE_NAME,
@@ -29,4 +30,5 @@ __all__ = [
     "PhotoHeadCounter",
     "RosterImporter",
     "STUDENT_COOKIE_NAME",
+    "calculate_distance_meters",
 ]

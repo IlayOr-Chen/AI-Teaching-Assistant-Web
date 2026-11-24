@@ -1,14 +1,16 @@
 """
 Purpose:
-    Implements `AttendanceManager` for Feature 1 (Smart Attendance):
-    1) Short-lived cryptographically signed rotating QR tokens + base64 PNG QR image generation,
-    2) External IP Same-Network validation with a live Lecturer toggle (`enforce_same_network`),
+    Implements `AttendanceManager` and `calculate_distance_meters` for Feature 1 (Smart Attendance):
+    1) Short-lived cryptographically signed rotating QR tokens (~8s UI rotation + ~15s total grace validity)
+       and Base64 PNG QR image generation,
+    2) GPS Geofencing validation via Browser Geolocation coordinates and the Haversine great-circle
+       distance formula, with a live Lecturer toggle (`enforce_geofence`) and configurable radius,
     3) 15-Minute Device Cooldown enforced via signed HTTP cookies and Firebase RTDB (`/device_cooldowns`),
-    4) Student mobile check-in, manual lecturer attendance overrides, and per-lesson attendance reports.
+    4) Student mobile check-in, manual lecturer attendance overrides, and CSV/Excel exports.
 Inputs:
     `FirebaseRepository` persistence instance and `AppConfig` runtime settings.
 Outputs:
-    `AttendanceManager` class managing `/attendance_sessions` and `/device_cooldowns`.
+    `AttendanceManager` class and `calculate_distance_meters` helper function.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from datetime import datetime, timezone
 import hashlib
 import hmac
 import io
+import math
 import secrets
 import time
 from typing import Any
@@ -31,17 +34,56 @@ from src.config import AppConfig
 from src.repository.firebase_repository import FirebaseRepository
 
 DEVICE_COOKIE_NAME = "ta_device_id"
+EARTH_RADIUS_METERS = 6_371_000.0
+
+
+def calculate_distance_meters(
+    lat1: float, lon1: float, lat2: float, lon2: float
+) -> float:
+    """
+    Purpose:
+        Calculate the great-circle distance in meters between two WGS84 GPS coordinates
+        (`(lat1, lon1)` and `(lat2, lon2)`) using the Haversine formula.
+    Inputs:
+        lat1 (float): Latitude of point 1 in decimal degrees (`-90.0` to `90.0`).
+        lon1 (float): Longitude of point 1 in decimal degrees (`-180.0` to `180.0`).
+        lat2 (float): Latitude of point 2 in decimal degrees (`-90.0` to `90.0`).
+        lon2 (float): Longitude of point 2 in decimal degrees (`-180.0` to `180.0`).
+    Outputs:
+        float: Great-circle distance between the two points in meters (rounded to 2 decimals).
+    """
+    f_lat1, f_lon1 = float(lat1), float(lon1)
+    f_lat2, f_lon2 = float(lat2), float(lon2)
+
+    if not (-90.0 <= f_lat1 <= 90.0 and -90.0 <= f_lat2 <= 90.0):
+        raise ValueError("Latitude values must be between -90.0 and 90.0 degrees.")
+    if not (-180.0 <= f_lon1 <= 180.0 and -180.0 <= f_lon2 <= 180.0):
+        raise ValueError("Longitude values must be between -180.0 and 180.0 degrees.")
+
+    # Convert decimal degrees to radians for Haversine spherical trigonometry
+    phi1 = math.radians(f_lat1)
+    phi2 = math.radians(f_lat2)
+    delta_phi = math.radians(f_lat2 - f_lat1)
+    delta_lambda = math.radians(f_lon2 - f_lon1)
+
+    # Haversine formula: a = sin^2(dlat/2) + cos(lat1)*cos(lat2)*sin^2(dlon/2)
+    a = (
+        math.sin(delta_phi / 2.0) ** 2
+        + math.cos(phi1) * math.cos(phi2) * (math.sin(delta_lambda / 2.0) ** 2)
+    )
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1.0 - a)))
+    return round(EARTH_RADIUS_METERS * c, 2)
 
 
 class AttendanceManager:
     """
     Purpose:
         Core domain service orchestrating smart classroom attendance sessions,
-        rotating signed QR codes, external IP same-network enforcement, and
+        rotating signed QR codes, Haversine GPS geofencing verification, and
         15-minute device cooldowns in Firebase RTDB.
     Inputs:
         repository (FirebaseRepository): Firebase RTDB persistence adapter.
-        config (AppConfig): Configuration holding QR rotation, cooldown, and JWT secrets.
+        config (AppConfig): Configuration holding QR rotation, geofence radius, cooldown, and JWT secrets.
     Outputs:
         `AttendanceManager` service instance.
     """
@@ -58,6 +100,51 @@ class AttendanceManager:
         """
         self.repository = repository
         self.config = config
+
+    @staticmethod
+    def calculate_distance_meters(
+        lat1: float, lon1: float, lat2: float, lon2: float
+    ) -> float:
+        """
+        Purpose:
+            Delegate to `calculate_distance_meters` to compute the Haversine distance
+            in meters between classroom and student GPS coordinates.
+        Inputs:
+            lat1 (float): Classroom latitude in decimal degrees.
+            lon1 (float): Classroom longitude in decimal degrees.
+            lat2 (float): Student latitude in decimal degrees.
+            lon2 (float): Student longitude in decimal degrees.
+        Outputs:
+            float: Distance in meters between the two GPS coordinates.
+        """
+        return calculate_distance_meters(lat1, lon1, lat2, lon2)
+
+    @staticmethod
+    def _validate_optional_coords(
+        lat: float | None, lng: float | None
+    ) -> tuple[float | None, float | None]:
+        """
+        Purpose:
+            Validate that optional latitude/longitude coordinates are either both None
+            or both valid WGS84 decimal degrees.
+        Inputs:
+            lat (float | None): Optional latitude.
+            lng (float | None): Optional longitude.
+        Outputs:
+            tuple[float | None, float | None]: Validated `(lat, lng)` tuple.
+        """
+        if lat is None and lng is None:
+            return None, None
+        if lat is None or lng is None:
+            raise ValueError(
+                "Both latitude and longitude must be provided together."
+            )
+        f_lat, f_lng = float(lat), float(lng)
+        if not (-90.0 <= f_lat <= 90.0):
+            raise ValueError("Latitude must be between -90.0 and 90.0 degrees.")
+        if not (-180.0 <= f_lng <= 180.0):
+            raise ValueError("Longitude must be between -180.0 and 180.0 degrees.")
+        return round(f_lat, 6), round(f_lng, 6)
 
     def create_signed_device_cookie(
         self, device_id: str | None = None
@@ -109,28 +196,36 @@ class AttendanceManager:
         self,
         lesson_id: str,
         lesson_title: str,
-        lecturer_ip: str,
-        enforce_same_network: bool | None = None,
+        classroom_lat: float | None = None,
+        classroom_lng: float | None = None,
+        geofence_radius_meters: int | None = None,
+        enforce_geofence: bool | None = None,
         rotation_seconds: int | None = None,
     ) -> dict[str, Any]:
         """
         Purpose:
             Create or re-open an attendance session in Firebase RTDB under
-            `/attendance_sessions/{lesson_id}`, capturing the Lecturer's external IP
-            for same-network classroom verification.
+            `/attendance_sessions/{lesson_id}`, storing the classroom GPS coordinates,
+            allowed geofence radius in meters, and geofence enforcement flag.
         Inputs:
             lesson_id (str): Unique lesson identifier (e.g., `"lesson_1"`).
             lesson_title (str): Human-readable title (e.g., `"Lesson 1: OOP & OOD"`).
-            lecturer_ip (str): Lecturer's resolved external IP address.
-            enforce_same_network (bool | None): Whether student external IPs must match
-                `lecturer_ip` (defaults to `config.enforce_same_network_default`).
-            rotation_seconds (int | None): QR token lifetime in seconds.
+            classroom_lat (float | None): Classroom GPS latitude (browser GPS or manual fallback).
+            classroom_lng (float | None): Classroom GPS longitude (browser GPS or manual fallback).
+            geofence_radius_meters (int | None): Allowed radius in meters (default 100m).
+            enforce_geofence (bool | None): Whether student GPS distance must be within
+                `geofence_radius_meters` (defaults to `config.enforce_geofence_default`).
+            rotation_seconds (int | None): UI QR token rotation interval in seconds (default 8s).
         Outputs:
             dict[str, Any]: Persisted attendance session state.
         """
         clean_id = lesson_id.strip()
         if not clean_id:
             raise ValueError("lesson_id is required to start an attendance session.")
+
+        valid_lat, valid_lng = self._validate_optional_coords(
+            classroom_lat, classroom_lng
+        )
 
         existing = self.repository.get(f"/attendance_sessions/{clean_id}")
         existing_records = (
@@ -141,10 +236,20 @@ class AttendanceManager:
         )
 
         enforce_flag = (
-            enforce_same_network
-            if enforce_same_network is not None
-            else self.config.enforce_same_network_default
+            enforce_geofence
+            if enforce_geofence is not None
+            else self.config.enforce_geofence_default
         )
+        radius_m = (
+            int(geofence_radius_meters)
+            if geofence_radius_meters is not None
+            else self.config.geofence_radius_meters
+        )
+        if radius_m < 10 or radius_m > 5000:
+            raise ValueError(
+                "geofence_radius_meters must be between 10 and 5000 meters."
+            )
+
         qr_ttl = (
             int(rotation_seconds)
             if rotation_seconds is not None and int(rotation_seconds) >= 3
@@ -156,8 +261,10 @@ class AttendanceManager:
             "lesson_id": clean_id,
             "lesson_title": lesson_title.strip() or clean_id,
             "active": True,
-            "lecturer_ip": (lecturer_ip or "127.0.0.1").strip(),
-            "enforce_same_network": bool(enforce_flag),
+            "classroom_lat": valid_lat,
+            "classroom_lng": valid_lng,
+            "geofence_radius_meters": radius_m,
+            "enforce_geofence": bool(enforce_flag),
             "rotation_seconds": qr_ttl,
             "started_at": now_ts,
             "closed_at": None,
@@ -183,20 +290,24 @@ class AttendanceManager:
         updates = {"active": False, "closed_at": int(time.time())}
         return self.repository.update(f"/attendance_sessions/{lesson_id.strip()}", updates)
 
-    def set_same_network_enforcement(
+    def set_geofence_enforcement(
         self,
         lesson_id: str,
-        enforce_same_network: bool,
-        lecturer_ip: str | None = None,
+        enforce_geofence: bool,
+        geofence_radius_meters: int | None = None,
+        classroom_lat: float | None = None,
+        classroom_lng: float | None = None,
     ) -> dict[str, Any]:
         """
         Purpose:
-            Toggle the Lecturer's "Enforce Same-Network IP Check" setting on an
-            attendance session (ON by default; can be turned OFF if students use cellular 4G/5G).
+            Toggle the Lecturer's "Enforce GPS Geofencing" setting (and optionally update
+            the allowed radius or classroom coordinates) live during an attendance session.
         Inputs:
             lesson_id (str): Target lesson session ID.
-            enforce_same_network (bool): True to require matching external IP, False to bypass.
-            lecturer_ip (str | None): Optional updated lecturer external IP.
+            enforce_geofence (bool): True to require student GPS within radius, False to bypass.
+            geofence_radius_meters (int | None): Optional updated radius in meters.
+            classroom_lat (float | None): Optional updated classroom latitude.
+            classroom_lng (float | None): Optional updated classroom longitude.
         Outputs:
             dict[str, Any]: Updated attendance session dictionary.
         """
@@ -204,9 +315,21 @@ class AttendanceManager:
         if session is None:
             raise ValueError(f"Attendance session '{lesson_id}' was not found.")
 
-        updates: dict[str, Any] = {"enforce_same_network": bool(enforce_same_network)}
-        if lecturer_ip:
-            updates["lecturer_ip"] = lecturer_ip.strip()
+        updates: dict[str, Any] = {"enforce_geofence": bool(enforce_geofence)}
+        if geofence_radius_meters is not None:
+            radius_val = int(geofence_radius_meters)
+            if radius_val < 10 or radius_val > 5000:
+                raise ValueError(
+                    "geofence_radius_meters must be between 10 and 5000 meters."
+                )
+            updates["geofence_radius_meters"] = radius_val
+
+        if classroom_lat is not None or classroom_lng is not None:
+            valid_lat, valid_lng = self._validate_optional_coords(
+                classroom_lat, classroom_lng
+            )
+            updates["classroom_lat"] = valid_lat
+            updates["classroom_lng"] = valid_lng
 
         return self.repository.update(f"/attendance_sessions/{lesson_id.strip()}", updates)
 
@@ -274,17 +397,18 @@ class AttendanceManager:
         """
         Purpose:
             Generate a short-lived, cryptographically signed QR attendance token and
-            accompanying Base64 PNG QR code for the active lesson session.
+            accompanying Base64 PNG QR code for the active lesson session (~8s UI rotation
+            with ~15s total server-side token validity including grace window).
         Inputs:
             lesson_id (str): Active lesson identifier.
-            base_url (str): Optional public origin URL (e.g., Cloudflare Tunnel or Render URL).
+            base_url (str): Optional public origin URL (Cloudflare Tunnel or Render URL).
             ttl_override_seconds (int | None): Optional custom lifetime in seconds (used in tests);
                 when set it replaces both the rotation period and the validity window.
             now_ts (int | None): Optional UNIX timestamp override for deterministic testing.
         Outputs:
             dict[str, Any]: Payload containing `lesson_id`, `qr_token`, `checkin_url`,
-            `qr_image_data_url`, `issued_at`, `expires_at`, `ttl_seconds` (how often the QR
-            rotates on screen) and `valid_for_seconds` (how long the token is accepted).
+            `qr_image_data_url`, `issued_at`, `expires_at`, `ttl_seconds` (UI rotation interval),
+            `valid_for_seconds` (total acceptance window), and geofence settings.
         """
         session = self.get_session(lesson_id)
         if session is None:
@@ -294,15 +418,14 @@ class AttendanceManager:
 
         issued_at = int(now_ts) if now_ts is not None else int(time.time())
         if ttl_override_seconds is not None:
-            # Explicit override (used by tests): rotation period and validity are identical
             rotation_seconds = int(ttl_override_seconds)
             valid_for_seconds = rotation_seconds
         else:
             rotation_seconds = int(
                 session.get("rotation_seconds", self.config.qr_rotation_seconds)
             )
-            # A student needs time to scan, load the page, pick a name and submit, so a
-            # rotated-out token stays acceptable for `qr_grace_seconds` extra seconds.
+            # Keep UI rotation fast (~8s) while granting a short server-side grace window
+            # (~7s extra -> ~15s total validity) so students scanning right before rotation succeed.
             valid_for_seconds = rotation_seconds + max(0, self.config.qr_grace_seconds)
         ttl_seconds = rotation_seconds
         expires_at = issued_at + valid_for_seconds
@@ -333,8 +456,12 @@ class AttendanceManager:
             "expires_at": expires_at,
             "ttl_seconds": ttl_seconds,
             "valid_for_seconds": valid_for_seconds,
-            "enforce_same_network": bool(session.get("enforce_same_network", True)),
-            "lecturer_ip": session.get("lecturer_ip", "127.0.0.1"),
+            "enforce_geofence": bool(session.get("enforce_geofence", True)),
+            "geofence_radius_meters": int(
+                session.get("geofence_radius_meters", self.config.geofence_radius_meters)
+            ),
+            "classroom_lat": session.get("classroom_lat"),
+            "classroom_lng": session.get("classroom_lng"),
         }
 
     def verify_qr_token(
@@ -418,7 +545,6 @@ class AttendanceManager:
         device_id: str,
         student_id: str,
         lesson_id: str,
-        student_ip: str,
         now_ts: int | None = None,
     ) -> dict[str, Any]:
         """
@@ -429,7 +555,6 @@ class AttendanceManager:
             device_id (str): Unique device identifier.
             student_id (str): Student ID that checked in from this device.
             lesson_id (str): Lesson ID of the check-in.
-            student_ip (str): Resolved external IP address of the device.
             now_ts (int | None): Optional UNIX timestamp override.
         Outputs:
             dict[str, Any]: Stored cooldown entry.
@@ -442,7 +567,6 @@ class AttendanceManager:
             "last_lesson_id": lesson_id,
             "last_checkin_at": current_ts,
             "expires_at": current_ts + cooldown_seconds,
-            "student_ip": student_ip,
         }
         self.repository.set(f"/device_cooldowns/{device_id}", entry)
         return entry
@@ -452,28 +576,31 @@ class AttendanceManager:
         lesson_id: str,
         student_id: str,
         qr_token: str,
-        student_ip: str,
+        student_lat: float | None = None,
+        student_lng: float | None = None,
         device_cookie_value: str | None = None,
         now_ts: int | None = None,
     ) -> dict[str, Any]:
         """
         Purpose:
             Execute the full multi-layer Student QR Attendance Check-In pipeline:
-            1) Validate active session & rotating signed QR token,
+            1) Validate active session & rotating signed QR token (~8s rotation + grace window),
             2) Validate 15-minute device cooldown (`/device_cooldowns` + signed cookie),
             3) Validate student exists in `/students` roster,
-            4) Validate Same-Network external IP match (when `enforce_same_network` is True),
-            5) Persist attendance record and lock device for 15 minutes.
+            4) Validate GPS Geofencing via Haversine distance (`distance <= geofence_radius_meters`
+               when `enforce_geofence` is True and classroom coordinates are configured),
+            5) Persist attendance record (with distance & geofence status) and lock device for 15 minutes.
         Inputs:
             lesson_id (str): Target lesson session ID.
             student_id (str): Selected student ID from the Firebase class roster.
             qr_token (str): Short-lived rotating QR token.
-            student_ip (str): Student's resolved external IP (`CF-Connecting-IP` / `X-Forwarded-For` / host).
+            student_lat (float | None): Student's GPS latitude from Browser Geolocation API.
+            student_lng (float | None): Student's GPS longitude from Browser Geolocation API.
             device_cookie_value (str | None): Incoming `ta_device_id` signed cookie if present.
             now_ts (int | None): Optional UNIX timestamp override for deterministic tests.
         Outputs:
             dict[str, Any]: Check-in confirmation containing `record`, `device_id`,
-            and `signed_device_cookie`.
+            `signed_device_cookie`, and `cooldown_expires_at`.
         """
         clean_lesson_id = lesson_id.strip()
         clean_student_id = student_id.strip()
@@ -504,17 +631,48 @@ class AttendanceManager:
                 f"Student '{clean_student_id}' is not registered in the class roster."
             )
 
-        # Step 5: Enforce Same-Network External IP Check (when enabled on the session)
-        clean_student_ip = (student_ip or "127.0.0.1").strip()
-        lecturer_ip = str(session.get("lecturer_ip", "127.0.0.1")).strip()
-        enforce_same_net = bool(session.get("enforce_same_network", True))
+        # Step 5: Enforce GPS Geofencing (Haversine distance against classroom coordinates)
+        enforce_geofence = bool(session.get("enforce_geofence", True))
+        classroom_lat = session.get("classroom_lat")
+        classroom_lng = session.get("classroom_lng")
+        allowed_radius_m = int(
+            session.get("geofence_radius_meters", self.config.geofence_radius_meters)
+        )
+        has_classroom_coords = (
+            classroom_lat is not None and classroom_lng is not None
+        )
+        has_student_coords = (
+            student_lat is not None and student_lng is not None
+        )
 
-        if enforce_same_net and clean_student_ip != lecturer_ip:
-            raise PermissionError(
-                f"Same-Network IP check failed: student external IP ({clean_student_ip}) "
-                f"does not match the classroom network external IP ({lecturer_ip}). "
-                f"Please connect to the classroom Wi-Fi."
+        distance_meters: float | None = None
+        if has_classroom_coords and has_student_coords:
+            distance_meters = calculate_distance_meters(
+                float(classroom_lat),
+                float(classroom_lng),
+                float(student_lat),
+                float(student_lng),
             )
+
+        if enforce_geofence and has_classroom_coords:
+            if not has_student_coords:
+                raise PermissionError(
+                    "GPS location permission is required to check in while classroom geofencing "
+                    "is enabled. Please allow Browser Geolocation (note: HTTPS via Cloudflare "
+                    "Tunnel / Render or localhost is required for Browser Geolocation) or ask "
+                    "the lecturer to disable GPS Geofencing."
+                )
+            assert distance_meters is not None
+            if distance_meters > allowed_radius_m:
+                raise PermissionError(
+                    f"GPS Geofence check failed: You appear to be {round(distance_meters)}m away "
+                    f"from the classroom (allowed: {allowed_radius_m}m)."
+                )
+            geofence_status = "verified"
+        elif not enforce_geofence:
+            geofence_status = "bypassed"
+        else:
+            geofence_status = "unconfigured"
 
         # Step 6: Persist student attendance record & 15-minute device cooldown
         checkin_ts = int(now_ts) if now_ts is not None else int(time.time())
@@ -526,7 +684,10 @@ class AttendanceManager:
             "status": "present",
             "method": "qr",
             "checked_in_at": checkin_ts,
-            "student_ip": clean_student_ip,
+            "student_lat": round(float(student_lat), 6) if student_lat is not None else None,
+            "student_lng": round(float(student_lng), 6) if student_lng is not None else None,
+            "distance_meters": distance_meters,
+            "geofence_status": geofence_status,
             "device_id": device_id,
         }
         self.repository.set(
@@ -537,7 +698,6 @@ class AttendanceManager:
             device_id=device_id,
             student_id=clean_student_id,
             lesson_id=clean_lesson_id,
-            student_ip=clean_student_ip,
             now_ts=checkin_ts,
         )
 
@@ -554,7 +714,6 @@ class AttendanceManager:
         lesson_id: str,
         student_id: str,
         status: str,
-        lecturer_ip: str = "127.0.0.1",
     ) -> dict[str, Any]:
         """
         Purpose:
@@ -564,7 +723,6 @@ class AttendanceManager:
             lesson_id (str): Target lesson identifier.
             student_id (str): Student identifier from `/students`.
             status (str): Desired status (`"present"` or `"absent"`).
-            lecturer_ip (str): Lecturer IP if auto-creating the lesson session.
         Outputs:
             dict[str, Any]: Updated attendance record for the student.
         """
@@ -581,7 +739,6 @@ class AttendanceManager:
             session = self.start_session(
                 lesson_id=lesson_id,
                 lesson_title=lesson_id,
-                lecturer_ip=lecturer_ip,
             )
 
         now_ts = int(time.time())
@@ -593,7 +750,10 @@ class AttendanceManager:
             "status": normalized_status,
             "method": "manual",
             "checked_in_at": now_ts if normalized_status == "present" else None,
-            "student_ip": lecturer_ip,
+            "student_lat": None,
+            "student_lng": None,
+            "distance_meters": None,
+            "geofence_status": "manual",
             "device_id": "lecturer_manual",
         }
         self.repository.set(
@@ -647,8 +807,13 @@ class AttendanceManager:
                     "checked_in_at": (
                         rec.get("checked_in_at") if isinstance(rec, dict) else None
                     ),
-                    "student_ip": (
-                        rec.get("student_ip", "-") if isinstance(rec, dict) else "-"
+                    "distance_meters": (
+                        rec.get("distance_meters") if isinstance(rec, dict) else None
+                    ),
+                    "geofence_status": (
+                        rec.get("geofence_status", "-")
+                        if isinstance(rec, dict)
+                        else "-"
                     ),
                 }
             )
@@ -703,10 +868,16 @@ class AttendanceManager:
                 "Status",
                 "Method",
                 "Checked In At",
-                "Student IP",
+                "Distance (m)",
+                "Geofence Status",
             ]
         )
         for row in report["roster_status"]:
+            dist_str = (
+                f"{row['distance_meters']:.1f}"
+                if row["distance_meters"] is not None
+                else "-"
+            )
             writer.writerow(
                 [
                     row["student_id"],
@@ -717,7 +888,8 @@ class AttendanceManager:
                     row["status"],
                     row["method"],
                     self._format_timestamp_iso(row["checked_in_at"]),
-                    row["student_ip"],
+                    dist_str,
+                    row["geofence_status"],
                 ]
             )
         return output.getvalue().encode("utf-8-sig")
@@ -726,7 +898,7 @@ class AttendanceManager:
         """
         Purpose:
             Generate an Excel (`.xlsx`) workbook containing the full per-student
-            attendance matrix and summary metrics for `lesson_id`.
+            attendance matrix and GPS geofence verification status for `lesson_id`.
         Inputs:
             lesson_id (str): Target lesson identifier.
         Outputs:
@@ -747,10 +919,16 @@ class AttendanceManager:
                 "Status",
                 "Method",
                 "Checked In At",
-                "Student IP",
+                "Distance (m)",
+                "Geofence Status",
             ]
         )
         for row in report["roster_status"]:
+            dist_val = (
+                round(float(row["distance_meters"]), 1)
+                if row["distance_meters"] is not None
+                else "-"
+            )
             ws.append(
                 [
                     row["student_id"],
@@ -761,11 +939,11 @@ class AttendanceManager:
                     row["status"],
                     row["method"],
                     self._format_timestamp_iso(row["checked_in_at"]),
-                    row["student_ip"],
+                    dist_val,
+                    row["geofence_status"],
                 ]
             )
 
         buffer = io.BytesIO()
         wb.save(buffer)
         return buffer.getvalue()
-

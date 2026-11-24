@@ -303,9 +303,37 @@ function renderLiveAttendanceTab(container, ctx) {
 
         const lessonNo = el('input', { type: 'number', min: 1, max: 99, value: highest + 1, required: true, name: 'lesson_no' });
         const title = el('input', { type: 'text', maxlength: 80, placeholder: 'Optional, e.g. Design Patterns', name: 'title' });
-        const rotation = el('select', { name: 'rotation' }, [10, 12, 15].map((n) => el('option', { value: n, selected: n === 12 }, `${n} seconds`)));
-        const enforce = el('input', { type: 'checkbox', checked: true, name: 'enforce' });
+        const rotation = el('select', { name: 'rotation' }, [6, 8, 10, 12, 15].map((n) => el('option', { value: n, selected: n === 8 }, `${n} seconds`)));
+        const radiusInput = el('input', { type: 'number', min: 30, max: 500, value: 100, required: true, name: 'geofence_radius_meters' });
+        const latInput = el('input', { type: 'text', value: '32.104400', placeholder: 'e.g. 32.104400', name: 'classroom_lat' });
+        const lngInput = el('input', { type: 'text', value: '35.207800', placeholder: 'e.g. 35.207800', name: 'classroom_lng' });
+        const enforce = el('input', { type: 'checkbox', checked: true, name: 'enforce_geofence' });
+        const detectGpsBtn = button('Use browser GPS', { cls: 'sm', iconName: 'wifi' });
+        const presetGpsBtn = button('Ariel Campus preset', { cls: 'sm ghost' });
         const start = button('Start attendance session', { cls: 'primary lg block', type: 'submit', iconName: 'play' });
+
+        detectGpsBtn.addEventListener('click', () => {
+            if (!navigator.geolocation) {
+                toast('Browser Geolocation is not available; enter coordinates manually.', 'warning');
+                return;
+            }
+            navigator.geolocation.getCurrentPosition(
+                (pos) => {
+                    latInput.value = pos.coords.latitude.toFixed(6);
+                    lngInput.value = pos.coords.longitude.toFixed(6);
+                    toast(`Captured classroom GPS (${latInput.value}, ${lngInput.value}).`, 'success');
+                },
+                (err) => {
+                    toast(`Could not read browser GPS (${err.message}). Using manual coordinate fallback.`, 'warning');
+                },
+                { enableHighAccuracy: true, timeout: 8000 },
+            );
+        });
+        presetGpsBtn.addEventListener('click', () => {
+            latInput.value = '32.104400';
+            lngInput.value = '35.207800';
+            toast('Applied Ariel University lecture hall coordinates.', 'info', 2200);
+        });
 
         const form = el('form', { class: 'stack' }, [
             el('div', { class: 'grid', style: 'grid-template-columns:1fr 1fr' }, [
@@ -313,9 +341,18 @@ function renderLiveAttendanceTab(container, ctx) {
                 el('label', { class: 'field' }, ['QR rotates every', rotation]),
             ]),
             el('label', { class: 'field' }, ['Title', title]),
+            el('div', { class: 'grid', style: 'grid-template-columns:1fr 1fr 1fr' }, [
+                el('label', { class: 'field' }, ['Classroom Lat', latInput]),
+                el('label', { class: 'field' }, ['Classroom Lng', lngInput]),
+                el('label', { class: 'field' }, ['Geofence Radius (m)', radiusInput]),
+            ]),
+            el('div', { class: 'row' }, [detectGpsBtn, presetGpsBtn]),
             el('label', { class: 'switch' }, [
                 enforce, el('span', { class: 'track' }),
-                el('span', { class: 'switch-text' }, [el('strong', {}, 'Enforce same-network IP check'), el('span', { class: 'faint' }, 'Students must be on the classroom network. Turn off if they use 4G/5G.')]),
+                el('span', { class: 'switch-text' }, [
+                    el('strong', {}, 'Enforce GPS Geofencing'),
+                    el('span', { class: 'faint' }, 'Verify student Browser Geolocation via Haversine distance (works across Campus NAT & 4G/5G).'),
+                ]),
             ]),
             start,
         ]);
@@ -324,31 +361,32 @@ function renderLiveAttendanceTab(container, ctx) {
             event.preventDefault();
             const n = Number(lessonNo.value);
             if (!Number.isInteger(n) || n < 1) { toast('Enter a valid lesson number.', 'warning'); return; }
+            const parsedLat = latInput.value.trim() ? Number(latInput.value.trim()) : null;
+            const parsedLng = lngInput.value.trim() ? Number(lngInput.value.trim()) : null;
             withLoading(start, async () => {
                 const session = await api.post('/api/attendance/sessions', {
                     lesson_id: `lesson_${n}`,
                     lesson_title: title.value.trim() || `Lesson ${n}`,
-                    enforce_same_network: enforce.checked,
+                    classroom_lat: Number.isFinite(parsedLat) ? parsedLat : null,
+                    classroom_lng: Number.isFinite(parsedLng) ? parsedLng : null,
+                    geofence_radius_meters: Number(radiusInput.value) || 100,
+                    enforce_geofence: enforce.checked,
                     rotation_seconds: Number(rotation.value),
                 });
                 toast(`${session.lesson_title} is live.`, 'success');
-                showActive(session, session.ip_warning);
+                showActive(session, session.geofence_warning);
             });
         });
 
-        const warnLocal = net.ip && /^(127\.|10\.|192\.168\.|::1|172\.(1[6-9]|2\d|3[01])\.)/.test(net.ip);
         mount(container, el('div', { class: 'grid grid-2' }, [
             el('div', { class: 'card stack' }, [
                 el('div', { class: 'card-title' }, [el('span', { html: icon('qr') }), el('h2', {}, 'Start a lesson')]),
                 form,
             ]),
             el('div', { class: 'card stack' }, [
-                el('div', { class: 'card-title' }, [el('span', { html: icon('wifi') }), el('h2', {}, 'Network check')]),
-                el('p', { class: 'muted' }, 'The server records the public IP you start the session from and compares it with each student\'s IP.'),
-                el('div', { class: 'row' }, [el('span', { class: `chip ${warnLocal ? 'warn' : 'ok'}` }, [el('span', { class: 'dot' }), `Your IP: ${net.ip || 'unknown'}`]), el('span', { class: 'faint' }, net.source ? `via ${net.source}` : '')]),
-                warnLocal
-                    ? el('div', { class: 'banner warn' }, [el('span', { html: icon('alert') }), el('span', {}, 'This is a local address. Open the dashboard through your public tunnel / Render URL, otherwise phones on the classroom Wi-Fi will not match. Or switch the check off.')])
-                    : el('div', { class: 'banner info' }, [el('span', { html: icon('info') }), el('span', {}, 'Looks like a public IP, so students on the same Wi-Fi should match.')]),
+                el('div', { class: 'card-title' }, [el('span', { html: icon('shield') }), el('h2', {}, 'GPS Geofencing (Haversine)')]),
+                el('p', { class: 'muted' }, 'Unlike Wi-Fi IP checks—which fail when university networks use multi-IP NAT or when students use 4G/5G—GPS Geofencing verifies physical classroom proximity directly in meters.'),
+                el('div', { class: 'banner info' }, [el('span', { html: icon('info') }), el('span', {}, 'Browser Geolocation requires HTTPS (provided automatically by Cloudflare Tunnel and Render) or localhost.')]),
             ]),
         ]));
     };
@@ -501,12 +539,12 @@ function renderLiveAttendanceTab(container, ctx) {
         stopActive = stop;
 
         /* ----- Controls ----- */
-        const enforceInput = el('input', { type: 'checkbox', checked: session.enforce_same_network !== false });
+        const enforceInput = el('input', { type: 'checkbox', checked: session.enforce_geofence !== false });
         enforceInput.addEventListener('change', async () => {
             const wanted = enforceInput.checked;
             try {
-                await api.patch(`/api/attendance/sessions/${encodeURIComponent(lessonId)}/network-toggle`, { enforce_same_network: wanted });
-                toast(wanted ? 'Same-network check is ON.' : 'Same-network check is OFF — students on 4G/5G can check in.', wanted ? 'success' : 'warning');
+                await api.patch(`/api/attendance/sessions/${encodeURIComponent(lessonId)}/geofence-toggle`, { enforce_geofence: wanted });
+                toast(wanted ? 'GPS Geofencing is ON.' : 'GPS Geofencing is OFF — students without location permission can check in.', wanted ? 'success' : 'warning');
             } catch (err) {
                 enforceInput.checked = !wanted; // revert the switch on failure
                 toast(err.message, 'error');
@@ -532,6 +570,10 @@ function renderLiveAttendanceTab(container, ctx) {
             });
         });
 
+        const coordsLabel = (session.classroom_lat !== null && session.classroom_lat !== undefined)
+            ? `Radius: ${session.geofence_radius_meters || 100}m around (${session.classroom_lat}, ${session.classroom_lng})`
+            : `Radius: ${session.geofence_radius_meters || 100}m`;
+
         mount(container, el('div', { class: 'grid grid-2' }, [
             el('div', { class: 'card qr-stage' }, [
                 el('div', { class: 'row', style: 'width:100%' }, [
@@ -542,7 +584,7 @@ function renderLiveAttendanceTab(container, ctx) {
                 ]),
                 mainQr.wrap,
                 el('div', { class: 'qr-url' }, [urlCode, copyBtn]),
-                el('p', { class: 'faint' }, 'The code changes automatically; older scans stay valid for a short grace period.'),
+                el('p', { class: 'faint' }, 'The code changes automatically (~8s); older scans stay valid for a short grace window (~15s).'),
             ]),
             el('div', { class: 'stack' }, [
                 ipWarning ? el('div', { class: 'banner warn' }, [el('span', { html: icon('alert') }), el('span', {}, ipWarning)]) : null,
@@ -553,10 +595,10 @@ function renderLiveAttendanceTab(container, ctx) {
                     feed,
                 ]),
                 el('div', { class: 'card stack' }, [
-                    el('div', { class: 'card-title' }, [el('span', { html: icon('wifi') }), el('h2', {}, 'Controls')]),
+                    el('div', { class: 'card-title' }, [el('span', { html: icon('shield') }), el('h2', {}, 'Controls')]),
                     el('label', { class: 'switch' }, [
                         enforceInput, el('span', { class: 'track' }),
-                        el('span', { class: 'switch-text' }, [el('strong', {}, 'Enforce same-network IP check'), el('span', { class: 'faint' }, `Classroom IP: ${session.lecturer_ip || 'unknown'}`)]),
+                        el('span', { class: 'switch-text' }, [el('strong', {}, 'Enforce GPS Geofencing'), el('span', { class: 'faint' }, coordsLabel)]),
                     ]),
                     closeBtn,
                 ]),
@@ -733,6 +775,10 @@ function renderRosterAndHeadcountTab(container, ctx) {
                 await loadLessonReport(activeLessonId);
             }));
 
+            const geoText = row.distance_meters !== null && row.distance_meters !== undefined
+                ? `${Math.round(row.distance_meters)}m (${row.geofence_status})`
+                : (row.geofence_status || '-');
+
             return el('tr', {}, [
                 el('td', { class: 'faint' }, String(index + 1)),
                 el('td', { dir: 'auto' }, el('strong', {}, row.full_name)),
@@ -743,6 +789,7 @@ function renderRosterAndHeadcountTab(container, ctx) {
                     isPresent ? 'Present' : 'Absent',
                 ])),
                 el('td', { class: 'faint' }, row.method || '-'),
+                el('td', { class: 'faint' }, geoText),
                 el('td', { class: 'faint' }, formatTime(row.checked_in_at)),
                 el('td', {}, toggleBtn),
             ]);
@@ -888,6 +935,7 @@ function renderRosterAndHeadcountTab(container, ctx) {
                         el('th', {}, 'Group'),
                         el('th', {}, 'Status'),
                         el('th', {}, 'Method'),
+                        el('th', {}, 'GPS Geofence'),
                         el('th', {}, 'Checked In At'),
                         el('th', {}, 'Manual Action'),
                     ])),

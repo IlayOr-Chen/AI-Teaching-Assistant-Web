@@ -69,7 +69,33 @@ export async function renderStudentCheckin(root, { lessonId, qrToken }) {
     }
 
     let selected = null;
+    let studentCoords = { lat: null, lng: null };
     const students = context.students;
+    const gpsChip = el('span', { class: 'chip warn' }, [el('span', { class: 'dot' }), 'Acquiring GPS location…']);
+
+    const requestStudentGps = () => {
+        if (!navigator.geolocation) {
+            gpsChip.className = 'chip warn';
+            gpsChip.textContent = 'Browser Geolocation unavailable';
+            return;
+        }
+        navigator.geolocation.getCurrentPosition(
+            (pos) => {
+                studentCoords = {
+                    lat: Number(pos.coords.latitude.toFixed(6)),
+                    lng: Number(pos.coords.longitude.toFixed(6)),
+                };
+                gpsChip.className = 'chip ok';
+                gpsChip.textContent = `GPS ready (${studentCoords.lat.toFixed(4)}, ${studentCoords.lng.toFixed(4)})`;
+            },
+            () => {
+                gpsChip.className = 'chip warn';
+                gpsChip.textContent = 'Location permission denied / unavailable';
+            },
+            { enableHighAccuracy: true, timeout: 8000 },
+        );
+    };
+    requestStudentGps();
 
     const search = el('input', { type: 'search', placeholder: 'Type your name…', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', 'aria-label': 'Search your name', dir: 'auto' });
     const list = el('div', { class: 'combo-list', role: 'listbox' });
@@ -125,6 +151,8 @@ export async function renderStudentCheckin(root, { lessonId, qrToken }) {
                     lesson_id: context.lesson_id,
                     student_id: selected.student_id,
                     qr_token: qrToken,
+                    student_lat: studentCoords.lat,
+                    student_lng: studentCoords.lng,
                 });
                 showSuccess(result);
             } catch (err) {
@@ -140,7 +168,10 @@ export async function renderStudentCheckin(root, { lessonId, qrToken }) {
      */
     function showSuccess(result) {
         history.replaceState(null, '', '/'); // drop the QR token from the address bar
-        mount(host, resultView('ok', 'You are checked in!', `${result.record.full_name} · ${formatTime(result.record.checked_in_at)}`, [
+        const distNote = result.record.distance_meters !== null && result.record.distance_meters !== undefined
+            ? ` · ${Math.round(result.record.distance_meters)}m from classroom`
+            : '';
+        mount(host, resultView('ok', 'You are checked in!', `${result.record.full_name} · ${formatTime(result.record.checked_in_at)}${distNote}`, [
             el('div', { class: 'banner info', style: 'text-align:left' }, [
                 el('span', { html: icon('clock') }),
                 el('span', {}, 'This device is now locked for 15 minutes so it cannot check in someone else.'),
@@ -149,7 +180,7 @@ export async function renderStudentCheckin(root, { lessonId, qrToken }) {
     }
 
     /**
-     * Purpose: Map backend refusals to clear screens (cooldown with live timer, wrong network, expired QR).
+     * Purpose: Map backend refusals to clear screens (cooldown with live timer, GPS geofence failure, expired QR).
      * Inputs:  err (ApiError | Error).
      * Outputs: void.
      */
@@ -158,10 +189,10 @@ export async function renderStudentCheckin(root, { lessonId, qrToken }) {
         if (err instanceof ApiError && err.status === 403 && /cooldown/i.test(message)) {
             const match = /\((\d+) seconds\)/.exec(message);
             showCooldown(match ? Number(match[1]) : 900);
-        } else if (/Same-Network/i.test(message)) {
-            mount(host, resultView('err', 'Not on the classroom network',
-                'Your phone is not on the same network as the lecturer. Connect to the classroom Wi-Fi and scan again — if you are on mobile data, tell your lecturer.',
-                [button('Try again', { cls: 'primary block', onclick: () => window.location.reload() })]));
+        } else if (/Geofence|location permission/i.test(message)) {
+            mount(host, resultView('err', 'Classroom GPS Geofence Check Failed',
+                message,
+                [button('Retry GPS & Check-In', { cls: 'primary block', onclick: () => window.location.reload() })]));
         } else if (/expired/i.test(message)) {
             mount(host, resultView('err', 'This QR code has expired',
                 'Scan the code currently shown on the lecturer\'s screen again.'));
@@ -194,7 +225,10 @@ export async function renderStudentCheckin(root, { lessonId, qrToken }) {
     mount(host, [
         el('div', { class: 'card stack' }, [
             el('div', { class: 'center' }, [
-                el('span', { class: 'chip ok live' }, [el('span', { class: 'dot' }), 'Check-in open']),
+                el('div', { class: 'row', style: 'justify-content:center' }, [
+                    el('span', { class: 'chip ok live' }, [el('span', { class: 'dot' }), 'Check-in open']),
+                    context.enforce_geofence ? gpsChip : null,
+                ]),
                 el('h1', { style: 'font-size:1.6rem;margin-top:0.7rem', dir: 'auto' }, context.lesson_title),
                 el('p', { class: 'muted' }, 'Pick your name from the class list.'),
             ]),
@@ -202,8 +236,8 @@ export async function renderStudentCheckin(root, { lessonId, qrToken }) {
             inlineError,
             submit,
         ]),
-        context.enforce_same_network
-            ? el('p', { class: 'faint center' }, 'Tip: use the classroom Wi-Fi — your network is verified.')
+        context.enforce_geofence
+            ? el('p', { class: 'faint center' }, `GPS Geofencing active: must be within ${context.geofence_radius_meters || 100}m of the classroom.`)
             : null,
     ]);
     showPicker();

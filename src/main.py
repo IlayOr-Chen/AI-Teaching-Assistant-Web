@@ -132,39 +132,51 @@ class StudentLoginRequest(BaseModel):
 class StartAttendanceSessionRequest(BaseModel):
     """
     Purpose:
-        Pydantic schema for starting or reopening a smart attendance session.
+        Pydantic schema for starting or reopening a smart attendance session
+        configured with GPS Geofencing and rotating QR parameters.
     Inputs:
-        lesson_id (str), lesson_title (str), enforce_same_network (bool | None),
-        rotation_seconds (int | None).
+        lesson_id (str), lesson_title (str), classroom_lat (float | None),
+        classroom_lng (float | None), geofence_radius_meters (int | None),
+        enforce_geofence (bool | None), rotation_seconds (int | None).
     Outputs:
         Validated `StartAttendanceSessionRequest` instance.
     """
 
     lesson_id: str
     lesson_title: str = ""
-    enforce_same_network: bool | None = None
+    classroom_lat: float | None = None
+    classroom_lng: float | None = None
+    geofence_radius_meters: int | None = None
+    enforce_geofence: bool | None = None
     rotation_seconds: int | None = None
 
 
-class NetworkToggleRequest(BaseModel):
+class GeofenceToggleRequest(BaseModel):
     """
     Purpose:
-        Pydantic schema for toggling the Same-Network IP check on an attendance session.
+        Pydantic schema for toggling "Enforce GPS Geofencing" or updating the
+        geofence radius / classroom GPS coordinates on an active attendance session.
     Inputs:
-        enforce_same_network (bool): True to require matching external IP, False to disable.
+        enforce_geofence (bool), geofence_radius_meters (int | None),
+        classroom_lat (float | None), classroom_lng (float | None).
     Outputs:
-        Validated `NetworkToggleRequest` instance.
+        Validated `GeofenceToggleRequest` instance.
     """
 
-    enforce_same_network: bool
+    enforce_geofence: bool
+    geofence_radius_meters: int | None = None
+    classroom_lat: float | None = None
+    classroom_lng: float | None = None
 
 
 class StudentQRCheckInRequest(BaseModel):
     """
     Purpose:
-        Pydantic schema for a Student QR code mobile check-in submission.
+        Pydantic schema for a Student QR code mobile check-in submission,
+        including optional Browser Geolocation coordinates (`student_lat`, `student_lng`).
     Inputs:
-        lesson_id (str), student_id (str), qr_token (str).
+        lesson_id (str), student_id (str), qr_token (str),
+        student_lat (float | None), student_lng (float | None).
     Outputs:
         Validated `StudentQRCheckInRequest` instance.
     """
@@ -172,6 +184,8 @@ class StudentQRCheckInRequest(BaseModel):
     lesson_id: str
     student_id: str
     qr_token: str
+    student_lat: float | None = None
+    student_lng: float | None = None
 
 
 class ManualAttendanceRequest(BaseModel):
@@ -530,10 +544,10 @@ def create_app(
     ) -> dict[str, Any]:
         """
         Purpose:
-            Lecturer-protected endpoint to activate an attendance session and capture
-            the Lecturer's external IP via `ClientIPResolver`.
+            Lecturer-protected endpoint to activate an attendance session with
+            classroom GPS geofencing coordinates, radius, and rotating QR settings.
         Inputs:
-            payload (StartAttendanceSessionRequest): Lesson ID, title, and IP check toggle.
+            payload (StartAttendanceSessionRequest): Lesson ID, title, and GPS geofence settings.
             request (Request): Incoming FastAPI request.
         Outputs:
             dict[str, Any]: Created or reopened attendance session state.
@@ -542,13 +556,14 @@ def create_app(
         svc.require_lecturer_claims(request)
 
         mgr: AttendanceManager = request.app.state.attendance_manager
-        lecturer_ip = ClientIPResolver.resolve(request)
         try:
             session = mgr.start_session(
                 lesson_id=payload.lesson_id,
                 lesson_title=payload.lesson_title or payload.lesson_id,
-                lecturer_ip=lecturer_ip,
-                enforce_same_network=payload.enforce_same_network,
+                classroom_lat=payload.classroom_lat,
+                classroom_lng=payload.classroom_lng,
+                geofence_radius_meters=payload.geofence_radius_meters,
+                enforce_geofence=payload.enforce_geofence,
                 rotation_seconds=payload.rotation_seconds,
             )
         except ValueError as exc:
@@ -556,18 +571,17 @@ def create_app(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             ) from exc
 
-        # A loopback/private lecturer IP can never match phones on the classroom Wi-Fi
-        # (typical when the dashboard is opened via http://localhost instead of the tunnel URL).
-        ip_warning = None
-        if session.get("enforce_same_network") and ClientIPResolver.is_loopback_or_private(
-            lecturer_ip
+        geofence_warning = None
+        if session.get("enforce_geofence") and (
+            session.get("classroom_lat") is None
+            or session.get("classroom_lng") is None
         ):
-            ip_warning = (
-                f"Your captured IP ({lecturer_ip}) is a local address, so students on the "
-                "classroom Wi-Fi will fail the same-network check. Open this dashboard through "
-                "the public tunnel/Render URL, or turn the Same-Network check off."
+            geofence_warning = (
+                "GPS Geofencing is enabled, but no classroom coordinates were set. "
+                "Provide classroom latitude/longitude (via Browser GPS or manual entry) "
+                "so student check-in distance can be verified."
             )
-        return {**session, "ip_warning": ip_warning}
+        return {**session, "geofence_warning": geofence_warning}
 
     @fastapi_app.get("/api/attendance/sessions", response_class=JSONResponse)
     async def list_attendance_sessions_endpoint(request: Request) -> dict[str, Any]:
@@ -595,15 +609,16 @@ def create_app(
         """
         Purpose:
             Public, QR-gated endpoint for the student mobile check-in page. It verifies the
-            scanned rotating token and, only then, returns the lesson title and the list of
-            roster names (`student_id` + `full_name`, no emails/groups) for the searchable
-            dropdown. Someone without a valid, unexpired QR token cannot enumerate the class.
+            scanned rotating token and, only then, returns the lesson title, GPS geofencing
+            requirements, and the list of roster names (`student_id` + `full_name`, no emails/groups)
+            for the searchable dropdown.
         Inputs:
             request (Request): Incoming FastAPI request.
             lesson_id (str): Lesson identifier from the QR link.
             qr_token (str): Signed rotating QR token from the QR link.
         Outputs:
-            dict[str, Any]: `lesson_id`, `lesson_title`, `enforce_same_network`, and `students`.
+            dict[str, Any]: `lesson_id`, `lesson_title`, `enforce_geofence`,
+            `geofence_radius_meters`, `has_classroom_coords`, and `students`.
         """
         mgr: AttendanceManager = request.app.state.attendance_manager
         importer: RosterImporter = request.app.state.roster_importer
@@ -624,10 +639,16 @@ def create_app(
             {"student_id": stu["student_id"], "full_name": stu.get("full_name", "")}
             for stu in importer.list_students()
         ]
+        has_coords = (
+            session.get("classroom_lat") is not None
+            and session.get("classroom_lng") is not None
+        )
         return {
             "lesson_id": session["lesson_id"],
             "lesson_title": session.get("lesson_title", session["lesson_id"]),
-            "enforce_same_network": bool(session.get("enforce_same_network", True)),
+            "enforce_geofence": bool(session.get("enforce_geofence", True)),
+            "geofence_radius_meters": int(session.get("geofence_radius_meters", 100)),
+            "has_classroom_coords": has_coords,
             "students": names,
         }
 
@@ -677,19 +698,19 @@ def create_app(
             ) from exc
 
     @fastapi_app.patch(
-        "/api/attendance/sessions/{lesson_id}/network-toggle",
+        "/api/attendance/sessions/{lesson_id}/geofence-toggle",
         response_class=JSONResponse,
     )
-    async def toggle_same_network_ip_check_endpoint(
-        lesson_id: str, payload: NetworkToggleRequest, request: Request
+    async def toggle_geofence_check_endpoint(
+        lesson_id: str, payload: GeofenceToggleRequest, request: Request
     ) -> dict[str, Any]:
         """
         Purpose:
-            Lecturer-protected endpoint to toggle "Enforce Same-Network IP Check"
-            on or off for an attendance session.
+            Lecturer-protected endpoint to toggle "Enforce GPS Geofencing" or update
+            the allowed radius / classroom coordinates on an attendance session.
         Inputs:
             lesson_id (str): Target lesson session ID.
-            payload (NetworkToggleRequest): Desired `enforce_same_network` boolean.
+            payload (GeofenceToggleRequest): Desired geofence enforcement state and optional radius/coords.
             request (Request): Incoming FastAPI request.
         Outputs:
             dict[str, Any]: Updated attendance session dictionary.
@@ -698,17 +719,21 @@ def create_app(
         svc.require_lecturer_claims(request)
 
         mgr: AttendanceManager = request.app.state.attendance_manager
-        lecturer_ip = ClientIPResolver.resolve(request)
         try:
-            return mgr.set_same_network_enforcement(
+            return mgr.set_geofence_enforcement(
                 lesson_id=lesson_id,
-                enforce_same_network=payload.enforce_same_network,
-                lecturer_ip=lecturer_ip,
+                enforce_geofence=payload.enforce_geofence,
+                geofence_radius_meters=payload.geofence_radius_meters,
+                classroom_lat=payload.classroom_lat,
+                classroom_lng=payload.classroom_lng,
             )
         except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
-            ) from exc
+            status_code = (
+                status.HTTP_404_NOT_FOUND
+                if "not found" in str(exc).lower()
+                else status.HTTP_400_BAD_REQUEST
+            )
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
     @fastapi_app.get(
         "/api/attendance/sessions/{lesson_id}/qr", response_class=JSONResponse
@@ -749,11 +774,11 @@ def create_app(
         """
         Purpose:
             Student mobile QR check-in endpoint enforcing:
-            1) Cryptographically signed rotating QR token validity,
-            2) External IP Same-Network validation (when enabled),
+            1) Cryptographically signed rotating QR token validity (~8s rotation + grace window),
+            2) GPS Geofencing validation via Haversine distance (when enabled),
             3) 15-Minute Device Cooldown via signed HTTP-only cookie + Firebase RTDB.
         Inputs:
-            payload (StudentQRCheckInRequest): Lesson ID, Student ID, and QR token.
+            payload (StudentQRCheckInRequest): Lesson ID, Student ID, QR token, and GPS coordinates.
             response (Response): FastAPI response used to set the signed device cookie.
             request (Request): Incoming FastAPI request.
         Outputs:
@@ -761,7 +786,6 @@ def create_app(
         """
         mgr: AttendanceManager = request.app.state.attendance_manager
         cfg: AppConfig = request.app.state.config
-        student_ip = ClientIPResolver.resolve(request)
         incoming_device_cookie = request.cookies.get(DEVICE_COOKIE_NAME)
 
         try:
@@ -769,7 +793,8 @@ def create_app(
                 lesson_id=payload.lesson_id,
                 student_id=payload.student_id,
                 qr_token=payload.qr_token,
-                student_ip=student_ip,
+                student_lat=payload.student_lat,
+                student_lng=payload.student_lng,
                 device_cookie_value=incoming_device_cookie,
             )
         except PermissionError as exc:
@@ -810,13 +835,11 @@ def create_app(
         svc.require_lecturer_claims(request)
 
         mgr: AttendanceManager = request.app.state.attendance_manager
-        lecturer_ip = ClientIPResolver.resolve(request)
         try:
             record = mgr.set_manual_attendance(
                 lesson_id=lesson_id,
                 student_id=payload.student_id,
                 status=payload.status,
-                lecturer_ip=lecturer_ip,
             )
             return {"lesson_id": lesson_id, "record": record}
         except ValueError as exc:

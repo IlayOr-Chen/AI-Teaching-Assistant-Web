@@ -100,7 +100,8 @@ def test_attendance_csv_export_utf8_bom_and_hebrew_roster() -> None:
         "Status",
         "Method",
         "Checked In At",
-        "Student IP",
+        "Distance (m)",
+        "Geofence Status",
     ]
 
     guy_row = next(r for r in rows[1:] if r[0] == guy_id)
@@ -108,6 +109,7 @@ def test_attendance_csv_export_utf8_bom_and_hebrew_roster() -> None:
     assert guy_row[5] == "present"
     assert guy_row[6] == "manual"
     assert "UTC" in guy_row[7]
+    assert guy_row[9] == "manual"
 
 
 def test_attendance_xlsx_export_valid_workbook_and_format_validation() -> None:

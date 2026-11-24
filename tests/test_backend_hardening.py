@@ -1,8 +1,9 @@
 """
 Purpose:
-    Tests for the backend hardening added while building the web UI (Checkpoint 5):
-    QR grace window, lecturer-only roster/report endpoints, QR-gated student name list,
-    same-network IP warning, and public-origin detection behind Cloudflare/Render proxies.
+    Tests for the backend hardening and GPS Geofencing refactor (Checkpoints 3.5 & 5):
+    QR grace window (~8s UI rotation + ~7s grace = ~15s total validity), lecturer-only
+    roster/report endpoints, QR-gated student name list, missing classroom coordinate
+    geofence warning, and public-origin detection behind Cloudflare/Render proxies.
 Inputs:
     In-memory `FirebaseRepository` and FastAPI `TestClient`.
 Outputs:
@@ -21,7 +22,6 @@ from src.config import AppConfig
 from src.main import create_app
 from src.repository.firebase_repository import FirebaseRepository
 from src.services.attendance_manager import AttendanceManager
-from src.utils.ip_resolver import ClientIPResolver
 
 SECRET = "hardening-test-secret-key-that-is-32-bytes-or-more"
 
@@ -95,8 +95,8 @@ def _register_lecturer(client: TestClient) -> None:
 def test_qr_token_grace_window_keeps_rotated_token_usable_briefly() -> None:
     """
     Purpose:
-        Verify the QR rotates every `rotation_seconds` but stays valid for
-        `rotation_seconds + qr_grace_seconds`, then expires.
+        Verify the QR rotates every `rotation_seconds` (~8s) on the UI but stays valid
+        for `rotation_seconds + qr_grace_seconds` (~15s total), then expires.
     Inputs:
         None.
     Outputs:
@@ -105,31 +105,39 @@ def test_qr_token_grace_window_keeps_rotated_token_usable_briefly() -> None:
     cfg = AppConfig(
         use_mock_firebase=True,
         jwt_secret=SECRET,
-        qr_rotation_seconds=12,
-        qr_grace_seconds=60,
+        qr_rotation_seconds=8,
+        qr_grace_seconds=7,
     )
     repo = FirebaseRepository(use_mock=True)
     mgr = AttendanceManager(repository=repo, config=cfg)
-    mgr.start_session("lesson_1", "Lesson 1", lecturer_ip="1.1.1.1")
+    mgr.start_session(
+        "lesson_1",
+        "Lesson 1",
+        classroom_lat=32.1044,
+        classroom_lng=35.2078,
+    )
 
     now = int(time.time())
     fresh = mgr.generate_rotating_qr_token("lesson_1")
-    assert fresh["ttl_seconds"] == 12  # on-screen rotation period
-    assert fresh["valid_for_seconds"] == 72  # acceptance window
-    assert fresh["expires_at"] - fresh["issued_at"] == 72
+    assert fresh["ttl_seconds"] == 8  # on-screen UI rotation period
+    assert fresh["valid_for_seconds"] == 15  # total server-side acceptance window
+    assert fresh["expires_at"] - fresh["issued_at"] == 15
 
-    # Scanned 30s ago (two rotations ago) -> still accepted
-    scanned_30s_ago = mgr.generate_rotating_qr_token("lesson_1", now_ts=now - 30)
-    assert mgr.verify_qr_token(scanned_30s_ago["qr_token"], "lesson_1")["lesson_id"] == "lesson_1"
+    # Scanned 10s ago (just after the 8s UI rotation) -> still accepted within 15s window
+    scanned_10s_ago = mgr.generate_rotating_qr_token("lesson_1", now_ts=now - 10)
+    assert (
+        mgr.verify_qr_token(scanned_10s_ago["qr_token"], "lesson_1")["lesson_id"]
+        == "lesson_1"
+    )
 
-    # Issued 80s ago -> beyond rotation + grace -> rejected
-    stale = mgr.generate_rotating_qr_token("lesson_1", now_ts=now - 80)
+    # Issued 20s ago -> beyond 15s (8s rotation + 7s grace) -> rejected
+    stale = mgr.generate_rotating_qr_token("lesson_1", now_ts=now - 20)
     with pytest.raises(ValueError, match="QR code has expired"):
         mgr.verify_qr_token(stale["qr_token"], "lesson_1")
 
-    # Token claims really carry the extended exp
+    # Token claims really carry the 15s extended exp
     claims = jwt.decode(fresh["qr_token"], SECRET, algorithms=["HS256"])
-    assert claims["exp"] - claims["iat"] == 72
+    assert claims["exp"] - claims["iat"] == 15
 
 
 def test_roster_and_attendance_reports_are_lecturer_only() -> None:
@@ -167,8 +175,8 @@ def test_roster_and_attendance_reports_are_lecturer_only() -> None:
 def test_checkin_context_is_qr_gated_and_hides_emails() -> None:
     """
     Purpose:
-        Verify `/api/attendance/checkin-context` only returns names for a valid,
-        unexpired token of an open session and never leaks emails or groups.
+        Verify `/api/attendance/checkin-context` only returns names and geofence context
+        for a valid, unexpired token of an open session and never leaks emails or groups.
     Inputs:
         None.
     Outputs:
@@ -178,8 +186,13 @@ def test_checkin_context_is_qr_gated_and_hides_emails() -> None:
     _register_lecturer(client)
     client.post(
         "/api/attendance/sessions",
-        json={"lesson_id": "lesson_1", "lesson_title": "Lesson 1"},
-        headers={"CF-Connecting-IP": "8.8.8.8"},
+        json={
+            "lesson_id": "lesson_1",
+            "lesson_title": "Lesson 1",
+            "classroom_lat": 32.1044,
+            "classroom_lng": 35.2078,
+            "geofence_radius_meters": 100,
+        },
     )
     qr = client.get("/api/attendance/sessions/lesson_1/qr").json()
 
@@ -191,6 +204,9 @@ def test_checkin_context_is_qr_gated_and_hides_emails() -> None:
     assert ok.status_code == 200
     body = ok.json()
     assert body["lesson_title"] == "Lesson 1"
+    assert body["enforce_geofence"] is True
+    assert body["geofence_radius_meters"] == 100
+    assert body["has_classroom_coords"] is True
     assert [s["full_name"] for s in body["students"]] == ["Alice Cohen", "Bob Levi"]
     for student in body["students"]:
         assert set(student) == {"student_id", "full_name"}
@@ -220,11 +236,12 @@ def test_checkin_context_is_qr_gated_and_hides_emails() -> None:
     assert "not open" in closed.json()["detail"]
 
 
-def test_start_session_warns_when_lecturer_ip_is_local() -> None:
+def test_start_session_warns_when_geofence_enabled_without_classroom_coords() -> None:
     """
     Purpose:
-        Verify the lecturer gets an `ip_warning` when their captured IP is loopback/private
-        and the same-network check is on, and no warning for a public IP or when the check is off.
+        Verify the lecturer receives a `geofence_warning` when `enforce_geofence=True`
+        but no `classroom_lat`/`classroom_lng` were provided, and no warning when
+        coordinates are supplied or when `enforce_geofence=False`.
     Inputs:
         None.
     Outputs:
@@ -233,41 +250,31 @@ def test_start_session_warns_when_lecturer_ip_is_local() -> None:
     client, _ = _make_client()
     _register_lecturer(client)
 
-    local = client.post(
+    missing_coords = client.post(
         "/api/attendance/sessions",
         json={"lesson_id": "l1", "lesson_title": "L1"},
-        headers={"X-Forwarded-For": "192.168.1.20"},
     ).json()
-    assert local["ip_warning"] and "192.168.1.20" in local["ip_warning"]
+    assert (
+        missing_coords["geofence_warning"]
+        and "no classroom coordinates" in missing_coords["geofence_warning"]
+    )
 
-    public = client.post(
+    with_coords = client.post(
         "/api/attendance/sessions",
-        json={"lesson_id": "l2", "lesson_title": "L2"},
-        headers={"CF-Connecting-IP": "84.110.45.200"},
+        json={
+            "lesson_id": "l2",
+            "lesson_title": "L2",
+            "classroom_lat": 32.1044,
+            "classroom_lng": 35.2078,
+        },
     ).json()
-    assert public["ip_warning"] is None
+    assert with_coords["geofence_warning"] is None
 
     check_off = client.post(
         "/api/attendance/sessions",
-        json={"lesson_id": "l3", "lesson_title": "L3", "enforce_same_network": False},
-        headers={"X-Forwarded-For": "10.0.0.5"},
+        json={"lesson_id": "l3", "lesson_title": "L3", "enforce_geofence": False},
     ).json()
-    assert check_off["ip_warning"] is None
-
-
-def test_is_loopback_or_private_classification() -> None:
-    """
-    Purpose:
-        Verify `ClientIPResolver.is_loopback_or_private` on typical addresses.
-    Inputs:
-        None.
-    Outputs:
-        None.
-    """
-    for local in ("127.0.0.1", "::1", "192.168.0.7", "10.1.2.3", "172.16.5.5", "testclient", ""):
-        assert ClientIPResolver.is_loopback_or_private(local) is True, local
-    for public in ("8.8.8.8", "84.110.45.200", "2001:4860:4860::8888"):
-        assert ClientIPResolver.is_loopback_or_private(public) is False, public
+    assert check_off["geofence_warning"] is None
 
 
 def test_qr_link_uses_public_origin_from_proxy_headers_or_config() -> None:
