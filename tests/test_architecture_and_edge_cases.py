@@ -310,3 +310,9 @@ def test_all_required_markdown_deliverables_and_deployment_configs_exist() -> No
         assert full_path.is_file(), f"Missing required deliverable: {rel_path}"
         assert full_path.stat().st_size > 50, f"Deliverable is unexpectedly empty: {rel_path}"
 
+    readme_text = (project_root / "README.md").read_text(encoding="utf-8")
+    assert r".\venv\Scripts\Activate.ps1" in readme_text
+    assert "source venv/Scripts/activate" in readme_text
+    assert "source venv/bin/activate" in readme_text
+
+

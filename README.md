@@ -108,33 +108,43 @@ AI-Teaching-Assistant-Web/
 
 ### 4.1 Local Setup with Python Virtual Environment (`venv`)
 
-1. **Create and activate a local `venv`:**
-   * **Windows (Git Bash):**
+1. **Create and activate a local `venv` (choose your shell):**
+
+   > **Important for Windows Users:** Do **not** run `source venv/Scripts/activate` inside **Windows PowerShell** (`source` is a Bash built-in, not a PowerShell cmdlet). Use `.\venv\Scripts\Activate.ps1` in PowerShell, or use `source venv/Scripts/activate` inside **Git Bash**.
+
+   * **Option A — Windows PowerShell (Default VS Code / Windows Terminal):**
+     ```powershell
+     python -m venv venv
+     # If PowerShell blocks script execution, run this once for the current session:
+     Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+     .\venv\Scripts\Activate.ps1
+     ```
+   * **Option B — Windows Git Bash (`MINGW64`):**
      ```bash
      python -m venv venv
      source venv/Scripts/activate
      ```
-   * **Windows (PowerShell):**
-     ```powershell
-     python -m venv venv
-     .\venv\Scripts\Activate.ps1
-     ```
-   * **macOS / Linux:**
+   * **Option C — macOS / Linux (`bash` / `zsh`):**
      ```bash
      python3 -m venv venv
      source venv/bin/activate
      ```
 
-2. **Install dependencies inside `venv`:**
+2. **Install dependencies inside the activated `venv`:**
    ```bash
    python -m pip install --upgrade pip
    python -m pip install -r requirements.txt
    ```
 
 3. **Configure `.env` and Firebase `serviceAccountKey.json`:**
-   ```bash
-   cp .env.example .env
-   ```
+   * **Windows PowerShell:**
+     ```powershell
+     Copy-Item .env.example .env
+     ```
+   * **Git Bash / macOS / Linux:**
+     ```bash
+     cp .env.example .env
+     ```
    * Target Firebase RTDB URL: `https://ai-teaching-assistant-web-default-rtdb.firebaseio.com/`
    * Place your Firebase Admin SDK private key file named `serviceAccountKey.json` in the project root directory (matching `FIREBASE_CREDENTIALS_PATH=serviceAccountKey.json` in `.env`).
    * `.env`, `serviceAccountKey.json`, `venv/`, and `.venv/` are excluded via [.gitignore](file:///c:/Users/ILAYO/Documents/Projects/AI-Teaching-Assistant-Web/.gitignore) and must **never** be committed to Git.
