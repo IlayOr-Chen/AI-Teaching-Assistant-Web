@@ -72,6 +72,7 @@ export const api = {
     get: (url) => request('GET', url),
     // Body is optional: bodyless POSTs (e.g. close session, multipart-or-default-asset import) send nothing
     post: (url, body) => request('POST', url, body),
+    put: (url, body) => request('PUT', url, body),
     patch: (url, body) => request('PATCH', url, body),
     upload: (url, formData) => request('POST', url, formData),
 };

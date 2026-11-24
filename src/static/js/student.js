@@ -7,6 +7,7 @@
  */
 
 import { api, ApiError } from './api.js';
+import { renderHomeworkTab } from './ai_tools.js';
 import { icon } from './icons.js';
 import { renderPollsTab, renderCommentsTab } from './polls_comments.js';
 import {
@@ -311,6 +312,7 @@ function buildStudentTabs(ctx) {
         { id: 'checkin', label: 'Check-in', icon: 'qr', render: (c) => renderStudentHomeTab(c, ctx) },
         { id: 'polls', label: 'Live Polls', icon: 'poll', render: (c) => renderPollsTab(c, { ...ctx, role: 'student' }) },
         { id: 'comments', label: 'Comments & Suggestions', icon: 'message', render: (c) => renderCommentsTab(c, { ...ctx, role: 'student' }) },
+        { id: 'homework', label: 'PDF Homework Review', icon: 'file', render: (c) => renderHomeworkTab(c, { ...ctx, role: 'student' }) },
     ];
 }
 

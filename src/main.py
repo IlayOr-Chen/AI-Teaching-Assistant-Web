@@ -42,9 +42,12 @@ from src.services.auth_service import (
     AuthService,
 )
 from src.services.comment_service import CommentService
+from src.services.gemini_client import GeminiClient
+from src.services.homework_reviewer import HomeworkReviewer
 from src.services.photo_head_counter import PhotoHeadCounter
 from src.services.poll_service import PollService
 from src.services.roster_importer import RosterImporter
+from src.services.video_summarizer import VideoSummarizer
 from src.utils.ip_resolver import ClientIPResolver
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -280,6 +283,36 @@ class CreateCommentReplyRequest(BaseModel):
     author_name: str | None = None
 
 
+class UpdateGeminiSettingsRequest(BaseModel):
+    """
+    Purpose:
+        Pydantic schema for updating the Lecturer's Gemini API key and model ID.
+    Inputs:
+        api_key (str | None), model_id (str | None).
+    Outputs:
+        Validated `UpdateGeminiSettingsRequest` instance.
+    """
+
+    api_key: str | None = None
+    model_id: str | None = None
+
+
+class CreateHomeworkAssignmentRequest(BaseModel):
+    """
+    Purpose:
+        Pydantic schema for creating a PDF homework assignment with a submission deadline.
+    Inputs:
+        title (str), description (str), deadline_ts (int), lesson_tag (str).
+    Outputs:
+        Validated `CreateHomeworkAssignmentRequest` instance.
+    """
+
+    title: str
+    description: str = ""
+    deadline_ts: int
+    lesson_tag: str = "Lesson 1"
+
+
 def create_app(
     config: AppConfig | None = None,
     repository: FirebaseRepository | None = None,
@@ -312,6 +345,13 @@ def create_app(
     )
     poll_service = PollService(repository=resolved_repo)
     comment_service = CommentService(repository=resolved_repo)
+    gemini_client = GeminiClient(repository=resolved_repo, config=resolved_config)
+    video_summarizer = VideoSummarizer(
+        repository=resolved_repo, gemini_client=gemini_client
+    )
+    homework_reviewer = HomeworkReviewer(
+        repository=resolved_repo, gemini_client=gemini_client
+    )
 
     fastapi_app = FastAPI(
         title="Web-Based AI Teaching Assistant",
@@ -331,6 +371,9 @@ def create_app(
     fastapi_app.state.photo_head_counter = photo_head_counter
     fastapi_app.state.poll_service = poll_service
     fastapi_app.state.comment_service = comment_service
+    fastapi_app.state.gemini_client = gemini_client
+    fastapi_app.state.video_summarizer = video_summarizer
+    fastapi_app.state.homework_reviewer = homework_reviewer
 
     if STATIC_DIR.is_dir():
         fastapi_app.mount(
@@ -1292,6 +1335,267 @@ def create_app(
                 else status.HTTP_400_BAD_REQUEST
             )
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    @fastapi_app.get("/api/settings/gemini", response_class=JSONResponse)
+    async def get_gemini_settings_endpoint(request: Request) -> dict[str, Any]:
+        """
+        Purpose:
+            Lecturer-protected endpoint returning the active Gemini model ID and
+            masked API key status from Firebase RTDB (`/settings/gemini`).
+        Inputs:
+            request (Request): Incoming FastAPI request.
+        Outputs:
+            dict[str, Any]: Dictionary with `model_id`, `has_api_key`, and `masked_api_key`.
+        """
+        svc: AuthService = request.app.state.auth_service
+        svc.require_lecturer_claims(request)
+
+        gemini: GeminiClient = request.app.state.gemini_client
+        return gemini.get_settings()
+
+    @fastapi_app.put("/api/settings/gemini", response_class=JSONResponse)
+    async def update_gemini_settings_endpoint(
+        payload: UpdateGeminiSettingsRequest, request: Request
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Lecturer-protected endpoint allowing the Lecturer to enter/update their
+            Gemini API Key and configure the Gemini Model ID (e.g., `gemini-2.5-flash-lite`
+            or custom `gemini-3.5-flash-lite`).
+        Inputs:
+            payload (UpdateGeminiSettingsRequest): New API key and/or model ID.
+            request (Request): Incoming FastAPI request.
+        Outputs:
+            dict[str, Any]: Updated public Gemini settings with masked key.
+        """
+        svc: AuthService = request.app.state.auth_service
+        svc.require_lecturer_claims(request)
+
+        gemini: GeminiClient = request.app.state.gemini_client
+        try:
+            return gemini.update_settings(
+                api_key=payload.api_key, model_id=payload.model_id
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+    @fastapi_app.post("/api/video/summarize", response_class=JSONResponse)
+    async def summarize_lecture_video_endpoint(
+        request: Request,
+        file: UploadFile = File(...),
+        lesson_tag: str = Query(default="Lesson 1"),
+        lecturer_notes: str = Query(default=""),
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Lecturer-protected endpoint for Feature 4 (ML Lecture Video Summary).
+            Strictly accepts `.mp4` files only, analyzes the lecture via `VideoSummarizer`
+            and `GeminiClient`, and returns a concise structured summary (Executive Summary,
+            Key Topics, Core Takeaways, Action Items, and Lecturer Delivery Insights).
+        Inputs:
+            request (Request): Incoming FastAPI request.
+            file (UploadFile): Uploaded `.mp4` lecture video file.
+            lesson_tag (str): Associated lesson identifier tag.
+            lecturer_notes (str): Optional context notes.
+        Outputs:
+            dict[str, Any]: Structured lecture video summary record.
+        """
+        svc: AuthService = request.app.state.auth_service
+        svc.require_lecturer_claims(request)
+
+        summarizer: VideoSummarizer = request.app.state.video_summarizer
+        try:
+            raw_bytes = await file.read()
+            return summarizer.summarize_video(
+                filename=file.filename or "",
+                video_bytes=raw_bytes,
+                content_type=file.content_type,
+                lesson_tag=lesson_tag,
+                lecturer_notes=lecturer_notes,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+    @fastapi_app.get("/api/video/summaries", response_class=JSONResponse)
+    async def list_video_summaries_endpoint(request: Request) -> dict[str, Any]:
+        """
+        Purpose:
+            List all generated lecture video summaries from `/video_summaries`.
+        Inputs:
+            request (Request): Incoming FastAPI request.
+        Outputs:
+            dict[str, Any]: Dictionary with `count` and `summaries`.
+        """
+        summarizer: VideoSummarizer = request.app.state.video_summarizer
+        items = summarizer.list_summaries()
+        return {"count": len(items), "summaries": items}
+
+    @fastapi_app.post("/api/homework/assignments", response_class=JSONResponse)
+    async def create_homework_assignment_endpoint(
+        payload: CreateHomeworkAssignmentRequest, request: Request
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Lecturer-protected endpoint to create a homework assignment with a
+            submission deadline.
+        Inputs:
+            payload (CreateHomeworkAssignmentRequest): Title, description, deadline, and lesson tag.
+            request (Request): Incoming FastAPI request.
+        Outputs:
+            dict[str, Any]: Created homework assignment overview.
+        """
+        svc: AuthService = request.app.state.auth_service
+        svc.require_lecturer_claims(request)
+
+        reviewer: HomeworkReviewer = request.app.state.homework_reviewer
+        try:
+            return reviewer.create_assignment(
+                title=payload.title,
+                description=payload.description,
+                deadline_ts=payload.deadline_ts,
+                lesson_tag=payload.lesson_tag,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+    @fastapi_app.get("/api/homework/assignments", response_class=JSONResponse)
+    async def list_homework_assignments_endpoint(request: Request) -> dict[str, Any]:
+        """
+        Purpose:
+            List all homework assignments with submission counts and release gate status.
+        Inputs:
+            request (Request): Incoming FastAPI request.
+        Outputs:
+            dict[str, Any]: Dictionary with `count` and `assignments`.
+        """
+        caller = _resolve_caller_identity(request)
+        reviewer: HomeworkReviewer = request.app.state.homework_reviewer
+        items = reviewer.list_assignments(viewer_id=caller["id"])
+        return {"count": len(items), "assignments": items}
+
+    @fastapi_app.post(
+        "/api/homework/assignments/{assignment_id}/end-now",
+        response_class=JSONResponse,
+    )
+    async def end_homework_submission_now_endpoint(
+        assignment_id: str, request: Request
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Lecturer one-click "End Submission Now" endpoint: immediately closes
+            submissions on `assignment_id` and unlocks AI reviews and peer comparisons.
+        Inputs:
+            assignment_id (str): Target homework assignment ID.
+            request (Request): Incoming FastAPI request.
+        Outputs:
+            dict[str, Any]: Updated assignment overview (`review_released=True`).
+        """
+        svc: AuthService = request.app.state.auth_service
+        svc.require_lecturer_claims(request)
+
+        reviewer: HomeworkReviewer = request.app.state.homework_reviewer
+        try:
+            return reviewer.end_submission_now(assignment_id=assignment_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+            ) from exc
+
+    @fastapi_app.post(
+        "/api/homework/assignments/{assignment_id}/submit",
+        response_class=JSONResponse,
+    )
+    async def submit_homework_pdf_endpoint(
+        assignment_id: str,
+        request: Request,
+        file: UploadFile = File(...),
+        student_id: str | None = Query(default=None),
+        student_name: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Student PDF homework submission endpoint enforcing:
+            1) Strict `.pdf` file extension, MIME type, and `%PDF` header validation,
+            2) Open submission deadline check (rejects uploads after deadline or "End Submission Now"),
+            3) Gated Release Rule (withholds AI review and peer comparison while submissions remain open).
+        Inputs:
+            assignment_id (str): Target homework assignment ID.
+            request (Request): Incoming FastAPI request.
+            file (UploadFile): Uploaded `.pdf` homework file.
+            student_id (str | None): Optional student ID override.
+            student_name (str | None): Optional student display name override.
+        Outputs:
+            dict[str, Any]: Gated submission confirmation receipt.
+        """
+        caller = _resolve_caller_identity(request)
+        effective_id = (student_id or "").strip() or caller["id"]
+        effective_name = (student_name or "").strip() or caller["name"]
+
+        reviewer: HomeworkReviewer = request.app.state.homework_reviewer
+        try:
+            pdf_bytes = await file.read()
+            return reviewer.submit_homework_pdf(
+                assignment_id=assignment_id,
+                student_id=effective_id,
+                student_name=effective_name,
+                filename=file.filename or "",
+                pdf_bytes=pdf_bytes,
+                content_type=file.content_type,
+            )
+        except PermissionError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)
+            ) from exc
+        except ValueError as exc:
+            status_code = (
+                status.HTTP_404_NOT_FOUND
+                if "not found" in str(exc).lower()
+                else status.HTTP_400_BAD_REQUEST
+            )
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    @fastapi_app.get(
+        "/api/homework/assignments/{assignment_id}/review",
+        response_class=JSONResponse,
+    )
+    async def get_homework_review_and_comparison_endpoint(
+        assignment_id: str,
+        request: Request,
+        student_id: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Retrieve a student's homework Review & Summary Card and Peer Comparison
+            Column. Enforces the Gated Release Rule (returns `review_released=False`
+            with `review=None` and `peer_comparison=None` while submissions are open)
+            and returns the First-Submission Edge Case notice when `total_submissions == 1`.
+        Inputs:
+            assignment_id (str): Target homework assignment ID.
+            request (Request): Incoming FastAPI request.
+            student_id (str | None): Optional student ID to inspect.
+        Outputs:
+            dict[str, Any]: Gated or unlocked Review + Peer Comparison payload.
+        """
+        caller = _resolve_caller_identity(request)
+        target_student_id = (student_id or "").strip() or caller["id"]
+
+        reviewer: HomeworkReviewer = request.app.state.homework_reviewer
+        try:
+            return reviewer.get_student_review_and_comparison(
+                assignment_id=assignment_id,
+                student_id=target_student_id,
+                viewer_role=caller["role"],
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+            ) from exc
 
     return fastapi_app
 

@@ -6,6 +6,7 @@
  */
 
 import { api } from './api.js';
+import { renderVideoSummaryTab, renderHomeworkTab } from './ai_tools.js';
 import { icon } from './icons.js';
 import { renderPollsTab, renderCommentsTab } from './polls_comments.js';
 import {
@@ -120,6 +121,8 @@ function buildLecturerTabs(ctx) {
         { id: 'roster', label: 'Roster & YOLO Headcount', icon: 'table', render: (c) => renderRosterAndHeadcountTab(c, ctx) },
         { id: 'polls', label: 'Live Polls', icon: 'poll', render: (c) => renderPollsTab(c, { ...ctx, role: 'lecturer' }) },
         { id: 'comments', label: 'Comments & Suggestions', icon: 'message', render: (c) => renderCommentsTab(c, { ...ctx, role: 'lecturer' }) },
+        { id: 'video', label: 'MP4 Lecture Summary', icon: 'video', render: (c) => renderVideoSummaryTab(c, { ...ctx, role: 'lecturer' }) },
+        { id: 'homework', label: 'PDF Homework Review', icon: 'file', render: (c) => renderHomeworkTab(c, { ...ctx, role: 'lecturer' }) },
     ];
 }
 
