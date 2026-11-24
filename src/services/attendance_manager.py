@@ -14,6 +14,8 @@ Outputs:
 from __future__ import annotations
 
 import base64
+import csv
+from datetime import datetime, timezone
 import hashlib
 import hmac
 import io
@@ -22,6 +24,7 @@ import time
 from typing import Any
 
 import jwt
+import openpyxl
 import qrcode
 
 from src.config import AppConfig
@@ -660,3 +663,109 @@ class AttendanceManager:
             "total_students": total_students,
             "roster_status": roster_rows,
         }
+
+    @staticmethod
+    def _format_timestamp_iso(unix_ts: int | float | None) -> str:
+        """
+        Purpose:
+            Format a UNIX timestamp in seconds into a human-readable UTC ISO-8601 string
+            for CSV and Excel attendance spreadsheet exports.
+        Inputs:
+            unix_ts (int | float | None): UNIX timestamp in seconds or None.
+        Outputs:
+            str: Formatted timestamp string (`YYYY-MM-DD HH:MM:SS UTC`) or `""` when None.
+        """
+        if not unix_ts:
+            return ""
+        dt = datetime.fromtimestamp(float(unix_ts), tz=timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    def export_attendance_csv(self, lesson_id: str) -> bytes:
+        """
+        Purpose:
+            Generate a UTF-8 with BOM (`utf-8-sig`) CSV attendance report for a lesson
+            so spreadsheet tools (including Microsoft Excel) render Hebrew student names cleanly.
+        Inputs:
+            lesson_id (str): Target lesson identifier.
+        Outputs:
+            bytes: Encoded CSV spreadsheet bytes.
+        """
+        report = self.get_lesson_attendance_report(lesson_id)
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(
+            [
+                "Student ID",
+                "Full Name",
+                "Email",
+                "Group",
+                "Lesson ID",
+                "Status",
+                "Method",
+                "Checked In At",
+                "Student IP",
+            ]
+        )
+        for row in report["roster_status"]:
+            writer.writerow(
+                [
+                    row["student_id"],
+                    row["full_name"],
+                    row["email"],
+                    row["group"] or "Unassigned",
+                    lesson_id,
+                    row["status"],
+                    row["method"],
+                    self._format_timestamp_iso(row["checked_in_at"]),
+                    row["student_ip"],
+                ]
+            )
+        return output.getvalue().encode("utf-8-sig")
+
+    def export_attendance_xlsx(self, lesson_id: str) -> bytes:
+        """
+        Purpose:
+            Generate an Excel (`.xlsx`) workbook containing the full per-student
+            attendance matrix and summary metrics for `lesson_id`.
+        Inputs:
+            lesson_id (str): Target lesson identifier.
+        Outputs:
+            bytes: Binary `.xlsx` workbook bytes ready for HTTP download.
+        """
+        report = self.get_lesson_attendance_report(lesson_id)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = f"Attendance {lesson_id}"[:31]
+
+        ws.append(
+            [
+                "Student ID",
+                "Full Name",
+                "Email",
+                "Group",
+                "Lesson ID",
+                "Status",
+                "Method",
+                "Checked In At",
+                "Student IP",
+            ]
+        )
+        for row in report["roster_status"]:
+            ws.append(
+                [
+                    row["student_id"],
+                    row["full_name"],
+                    row["email"],
+                    row["group"] or "Unassigned",
+                    lesson_id,
+                    row["status"],
+                    row["method"],
+                    self._format_timestamp_iso(row["checked_in_at"]),
+                    row["student_ip"],
+                ]
+            )
+
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        return buffer.getvalue()
+

@@ -116,6 +116,7 @@ function buildLecturerTabs(ctx) {
     return [
         { id: 'overview', label: 'Overview', icon: 'grid', render: (c) => renderOverviewTab(c, ctx) },
         { id: 'attendance', label: 'Live attendance', icon: 'qr', render: (c) => renderLiveAttendanceTab(c, ctx) },
+        { id: 'roster', label: 'Roster & YOLO Headcount', icon: 'table', render: (c) => renderRosterAndHeadcountTab(c, ctx) },
     ];
 }
 
@@ -565,4 +566,336 @@ function renderLiveAttendanceTab(container, ctx) {
 
     showSetup();
     return cleanup;
+}
+
+/* ------------------------------------------------------------------ */
+/* Roster, Attendance Management & YOLO Headcount tab (Checkpoint 6)  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Purpose: Render the full Attendance Management & YOLO Classroom Headcount tab:
+ *          1) Lesson selector, search/group/status filters, and CSV / Excel (.xlsx) export buttons,
+ *          2) YOLO classroom photo upload + one-click `/assets/p3.jpeg` test + side-by-side
+ *             Detected vs. Self-Registered counts + visual GREEN / ORANGE / RED confidence card
+ *             + annotated bounding-box photo display,
+ *          3) Complete student roster table (Full Name, Email, Group, Status, Method, Timestamp)
+ *             with one-click manual Present/Absent toggle per student.
+ * Inputs:  container (HTMLElement); ctx (dashboard context).
+ * Outputs: void.
+ */
+function renderRosterAndHeadcountTab(container, ctx) {
+    let activeLessonId = 'lesson_1';
+    let reportData = null;
+    let latestYoloReport = null;
+
+    const lessonSelect = el('select', { name: 'lesson_select', 'aria-label': 'Select lesson' });
+    const searchInput = el('input', { type: 'search', placeholder: 'Search name or email…', 'aria-label': 'Search student' });
+    const groupSelect = el('select', { 'aria-label': 'Filter by group' }, [
+        el('option', { value: '' }, 'All groups'),
+    ]);
+    const statusSelect = el('select', { 'aria-label': 'Filter by attendance status' }, [
+        el('option', { value: '' }, 'All statuses'),
+        el('option', { value: 'present' }, 'Present only'),
+        el('option', { value: 'absent' }, 'Absent only'),
+    ]);
+
+    const presentStat = statCard('Self-registered present');
+    const absentStat = statCard('Absent');
+    const yoloStat = statCard('YOLO photo headcount');
+    const statusStat = statCard('Confidence indicator', { small: true });
+
+    const yoloResultHost = el('div', { class: 'stack' });
+    const tableBody = el('tbody');
+    const tableSummary = el('span', { class: 'faint' }, 'Loading roster…');
+
+    /**
+     * Purpose: Trigger a browser download of the CSV or Excel (.xlsx) attendance export.
+     * Inputs:  format ('csv' | 'xlsx').
+     * Outputs: void.
+     */
+    const downloadExport = (format) => {
+        const url = `/api/attendance/sessions/${encodeURIComponent(activeLessonId)}/export?format=${encodeURIComponent(format)}`;
+        const link = el('a', { href: url, download: `attendance_${activeLessonId}.${format}`, class: 'hidden' });
+        document.body.append(link);
+        link.click();
+        link.remove();
+        toast(`Downloading ${format.toUpperCase()} attendance spreadsheet for ${activeLessonId}…`, 'info', 2600);
+    };
+
+    /**
+     * Purpose: Render the YOLO confidence indicator card (GREEN / ORANGE / RED) and
+     *          side-by-side comparison between YOLO Detected Count and Self-Registered Count.
+     * Inputs:  yolo (object | null) YOLO headcount report.
+     * Outputs: void.
+     */
+    const renderYoloPanel = (yolo) => {
+        const regCount = reportData ? reportData.present_count : 0;
+        if (!yolo) {
+            yoloStat.set('—', 'Upload photo or test p3.jpeg');
+            statusStat.set('Not run yet', 'Run YOLO headcount below');
+            mount(yoloResultHost, el('div', { class: 'empty' },
+                'Upload a classroom photo or click "Test on Classroom Photo (p3.jpeg)" to compare physical headcount against self-registered attendance.'));
+            return;
+        }
+
+        const color = yolo.status_color || 'GREEN';
+        const diff = yolo.discrepancy !== null && yolo.discrepancy !== undefined
+            ? (yolo.discrepancy > 0 ? `+${yolo.discrepancy}` : String(yolo.discrepancy))
+            : String(yolo.detected_count - regCount);
+
+        yoloStat.set(String(yolo.detected_count), `Avg conf ${(yolo.average_confidence * 100).toFixed(1)}%`);
+        statusStat.set(color, yolo.status_label || '');
+
+        mount(yoloResultHost, [
+            el('div', { class: `yolo-status-card status-${color}` }, [
+                el('div', { class: 'row' }, [
+                    el('span', { class: `yolo-badge ${color}` }, `${color} · ${yolo.status_label || 'Confidence Assessment'}`),
+                    el('span', { class: 'spacer' }),
+                    el('span', { class: 'faint' }, `High (>=0.60): ${yolo.high_confidence_count ?? 0} · Low (<0.45): ${yolo.low_confidence_count ?? 0}`),
+                ]),
+                el('p', {}, yolo.status_reason || ''),
+            ]),
+            el('div', { class: 'yolo-compare-grid' }, [
+                el('div', { class: 'card stat' }, [
+                    el('div', { class: 'stat-label' }, 'YOLO Detected Count'),
+                    el('div', { class: 'stat-value' }, String(yolo.detected_count)),
+                    el('div', { class: 'stat-sub' }, 'Physical persons in photo'),
+                ]),
+                el('div', { class: 'card stat' }, [
+                    el('div', { class: 'stat-label' }, 'Self-Registered Count'),
+                    el('div', { class: 'stat-value' }, String(yolo.registered_count ?? regCount)),
+                    el('div', { class: 'stat-sub' }, `Checked in (${activeLessonId})`),
+                ]),
+                el('div', { class: 'card stat' }, [
+                    el('div', { class: 'stat-label' }, 'Count Discrepancy'),
+                    el('div', { class: 'stat-value' }, diff),
+                    el('div', { class: 'stat-sub' }, 'Detected minus registered'),
+                ]),
+            ]),
+            yolo.annotated_image_data_url
+                ? el('div', { class: 'yolo-photo-frame' }, [
+                    el('img', { src: yolo.annotated_image_data_url, alt: 'Annotated YOLO classroom headcount with bounding boxes and confidence scores' }),
+                ])
+                : null,
+        ]);
+    };
+
+    /**
+     * Purpose: Render the filtered student roster table rows with manual attendance toggle buttons.
+     * Inputs:  none (reads `reportData` and filter inputs).
+     * Outputs: void.
+     */
+    const renderTableRows = () => {
+        if (!reportData) return;
+        const q = searchInput.value.trim().toLowerCase();
+        const gFilter = groupSelect.value;
+        const sFilter = statusSelect.value;
+
+        const allRows = reportData.roster_status || [];
+        const filtered = allRows.filter((row) => {
+            if (q) {
+                const matchName = (row.full_name || '').toLowerCase().includes(q);
+                const matchEmail = (row.email || '').toLowerCase().includes(q);
+                if (!matchName && !matchEmail) return false;
+            }
+            if (gFilter === '__unassigned__') {
+                if (row.group) return false;
+            } else if (gFilter && String(row.group) !== gFilter) {
+                return false;
+            }
+            if (sFilter && row.status !== sFilter) return false;
+            return true;
+        });
+
+        tableSummary.textContent = `Showing ${filtered.length} of ${allRows.length} students for ${activeLessonId}`;
+
+        if (!filtered.length) {
+            mount(tableBody, el('tr', {}, el('td', { colspan: '8', class: 'center muted', style: 'padding:1.5rem' },
+                allRows.length === 0
+                    ? 'No students imported yet. Import the class Excel roster from the Overview tab.'
+                    : 'No students match the current search/filter criteria.')));
+            return;
+        }
+
+        const trs = filtered.map((row, index) => {
+            const isPresent = row.status === 'present';
+            const toggleBtn = button(isPresent ? 'Mark Absent' : 'Mark Present', {
+                cls: `sm ${isPresent ? 'ghost' : 'primary'}`,
+                iconName: isPresent ? 'x' : 'check',
+            });
+            toggleBtn.addEventListener('click', () => withLoading(toggleBtn, async () => {
+                const nextStatus = isPresent ? 'absent' : 'present';
+                await api.post(`/api/attendance/sessions/${encodeURIComponent(activeLessonId)}/manual`, {
+                    student_id: row.student_id,
+                    status: nextStatus,
+                });
+                toast(`${row.full_name} marked ${nextStatus.toUpperCase()}.`, 'success', 2400);
+                await loadLessonReport(activeLessonId);
+            }));
+
+            return el('tr', {}, [
+                el('td', { class: 'faint' }, String(index + 1)),
+                el('td', { dir: 'auto' }, el('strong', {}, row.full_name)),
+                el('td', { class: 'muted' }, row.email),
+                el('td', {}, row.group ? el('span', { class: 'chip' }, `Group ${row.group}`) : el('span', { class: 'faint' }, 'Unassigned')),
+                el('td', {}, el('span', { class: `chip ${isPresent ? 'ok' : 'danger'}` }, [
+                    el('span', { class: 'dot' }),
+                    isPresent ? 'Present' : 'Absent',
+                ])),
+                el('td', { class: 'faint' }, row.method || '-'),
+                el('td', { class: 'faint' }, formatTime(row.checked_in_at)),
+                el('td', {}, toggleBtn),
+            ]);
+        });
+        mount(tableBody, trs);
+    };
+
+    /**
+     * Purpose: Populate the group filter dropdown dynamically from the roster groups.
+     * Inputs:  rows (array) roster status entries.
+     * Outputs: void.
+     */
+    const updateGroupFilterOptions = (rows) => {
+        const current = groupSelect.value;
+        const groups = Array.from(new Set(rows.map((r) => r.group).filter(Boolean))).sort();
+        const opts = [
+            el('option', { value: '' }, 'All groups'),
+            ...groups.map((g) => el('option', { value: g }, `Group ${g}`)),
+            el('option', { value: '__unassigned__' }, 'Unassigned group'),
+        ];
+        mount(groupSelect, opts);
+        groupSelect.value = current;
+    };
+
+    /**
+     * Purpose: Load the attendance report for `lessonId` and refresh stats, YOLO comparison, and table.
+     * Inputs:  lessonId (string).
+     * Outputs: Promise<void>.
+     */
+    const loadLessonReport = async (lessonId) => {
+        activeLessonId = lessonId;
+        reportData = await api.get(`/api/attendance/sessions/${encodeURIComponent(lessonId)}`);
+        presentStat.set(String(reportData.present_count), `of ${reportData.total_students} roster students`);
+        absentStat.set(String(reportData.absent_count), reportData.session?.active ? 'Session is LIVE' : 'Session inactive/closed');
+
+        updateGroupFilterOptions(reportData.roster_status || []);
+        renderTableRows();
+
+        const storedYolo = reportData.session?.yolo_headcount || null;
+        if (latestYoloReport && latestYoloReport.lesson_id === lessonId) {
+            renderYoloPanel(latestYoloReport);
+        } else {
+            renderYoloPanel(storedYolo);
+        }
+    };
+
+    /**
+     * Purpose: Load available lessons and initialize the lesson selector dropdown.
+     * Inputs:  none.
+     * Outputs: Promise<void>.
+     */
+    const initLessons = async () => {
+        try {
+            const { sessions } = await api.get('/api/attendance/sessions');
+            const ids = Array.from(new Set([
+                ...sessions.map((s) => s.lesson_id),
+                'lesson_1', 'lesson_2', 'lesson_3',
+            ]));
+            const live = sessions.find((s) => s.active);
+            if (live) activeLessonId = live.lesson_id;
+            mount(lessonSelect, ids.map((id) => {
+                const match = sessions.find((s) => s.lesson_id === id);
+                const label = match ? `${match.lesson_title} (${id})${match.active ? ' · LIVE' : ''}` : id;
+                return el('option', { value: id, selected: id === activeLessonId }, label);
+            }));
+            await loadLessonReport(activeLessonId);
+        } catch (err) {
+            toast(err.message, 'error');
+        }
+    };
+
+    lessonSelect.addEventListener('change', () => loadLessonReport(lessonSelect.value));
+    searchInput.addEventListener('input', renderTableRows);
+    groupSelect.addEventListener('change', renderTableRows);
+    statusSelect.addEventListener('change', renderTableRows);
+
+    /* ----- YOLO Classroom Photo Upload & Sample Test Controls ----- */
+    const photoInput = el('input', { type: 'file', accept: '.jpg,.jpeg,.png,.webp', class: 'hidden' });
+    const uploadPhotoBtn = button('Upload classroom photo', { cls: 'primary', iconName: 'camera' });
+    const samplePhotoBtn = button('Test on Classroom Photo (p3.jpeg)', { cls: '', iconName: 'users' });
+
+    uploadPhotoBtn.addEventListener('click', () => photoInput.click());
+    photoInput.addEventListener('change', () => {
+        const file = photoInput.files[0];
+        if (!file) return;
+        const form = new FormData();
+        form.append('file', file);
+        withLoading(uploadPhotoBtn, async () => {
+            const url = `/api/attendance/headcount?lesson_id=${encodeURIComponent(activeLessonId)}`;
+            latestYoloReport = await api.upload(url, form);
+            renderYoloPanel(latestYoloReport);
+            toast(`YOLO detected ${latestYoloReport.detected_count} persons (${latestYoloReport.status_color}).`, 'success');
+        });
+        photoInput.value = '';
+    });
+
+    samplePhotoBtn.addEventListener('click', () => withLoading(samplePhotoBtn, async () => {
+        const url = `/api/attendance/headcount?use_default_asset=true&lesson_id=${encodeURIComponent(activeLessonId)}`;
+        latestYoloReport = await api.post(url);
+        renderYoloPanel(latestYoloReport);
+        toast(`YOLO detected ${latestYoloReport.detected_count} persons on p3.jpeg (${latestYoloReport.status_color}).`, 'success');
+    }));
+
+    mount(container, el('div', { class: 'stack' }, [
+        el('div', { class: 'grid grid-stats' }, [presentStat.node, absentStat.node, yoloStat.node, statusStat.node]),
+        el('div', { class: 'card stack' }, [
+            el('div', { class: 'row' }, [
+                el('div', { class: 'card-title', style: 'margin-bottom:0' }, [
+                    el('span', { html: icon('camera') }),
+                    el('h2', {}, 'YOLO Classroom Headcount & Confidence Verification'),
+                ]),
+                el('span', { class: 'spacer' }),
+                uploadPhotoBtn,
+                samplePhotoBtn,
+                photoInput,
+            ]),
+            el('p', { class: 'muted' }, 'Runs local Ultralytics YOLO person detection, annotates bounding boxes with confidence scores, and flags discrepancies (GREEN / ORANGE / RED) against self-registered attendance.'),
+            yoloResultHost,
+        ]),
+        el('div', { class: 'card stack' }, [
+            el('div', { class: 'row' }, [
+                el('div', { class: 'card-title', style: 'margin-bottom:0' }, [
+                    el('span', { html: icon('table') }),
+                    el('h2', {}, 'Student Roster & Per-Lesson Attendance Management'),
+                ]),
+                el('span', { class: 'spacer' }),
+                button('Export CSV (.csv)', { cls: 'sm', iconName: 'download', onclick: () => downloadExport('csv') }),
+                button('Export Excel (.xlsx)', { cls: 'sm primary', iconName: 'download', onclick: () => downloadExport('xlsx') }),
+            ]),
+            el('div', { class: 'toolbar-grid' }, [
+                el('label', { class: 'field' }, ['Lesson session', lessonSelect]),
+                el('label', { class: 'field' }, ['Search student', searchInput]),
+                el('label', { class: 'field' }, ['Group filter', groupSelect]),
+                el('label', { class: 'field' }, ['Attendance status', statusSelect]),
+            ]),
+            el('div', { class: 'row' }, [tableSummary]),
+            el('div', { class: 'table-wrap' }, [
+                el('table', { class: 'data' }, [
+                    el('thead', {}, el('tr', {}, [
+                        el('th', {}, '#'),
+                        el('th', {}, 'Full Name'),
+                        el('th', {}, 'Email'),
+                        el('th', {}, 'Group'),
+                        el('th', {}, 'Status'),
+                        el('th', {}, 'Method'),
+                        el('th', {}, 'Checked In At'),
+                        el('th', {}, 'Manual Action'),
+                    ])),
+                    tableBody,
+                ]),
+            ]),
+        ]),
+    ]));
+
+    initLessons();
 }

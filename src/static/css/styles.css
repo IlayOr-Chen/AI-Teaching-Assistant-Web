@@ -302,6 +302,26 @@ select option { background: #131a36; color: var(--text); }
 .icon.lg { width: 28px; height: 28px; }
 
 table.data { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+.table-wrap { width: 100%; overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); background: rgba(8, 12, 28, 0.45); max-height: 540px; overflow-y: auto; }
+table.data th, table.data td { padding: 0.75rem 0.9rem; text-align: left; border-bottom: 1px solid rgba(255, 255, 255, 0.06); white-space: nowrap; }
+table.data th { position: sticky; top: 0; z-index: 2; background: #121a37; color: var(--text-dim); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700; }
+table.data tbody tr { transition: background 0.2s var(--ease); }
+table.data tbody tr:hover { background: rgba(124, 140, 255, 0.09); }
+
+/* ---------- YOLO Confidence Status Card (GREEN / ORANGE / RED) ---------- */
+.yolo-status-card { border-radius: var(--radius-sm); padding: 1rem 1.15rem; border: 1.5px solid var(--border); display: flex; flex-direction: column; gap: 0.5rem; animation: fade-up 0.4s var(--ease) both; }
+.yolo-status-card.status-GREEN { border-color: rgba(52, 211, 153, 0.55); background: rgba(52, 211, 153, 0.11); }
+.yolo-status-card.status-ORANGE { border-color: rgba(251, 191, 36, 0.6); background: rgba(251, 191, 36, 0.11); }
+.yolo-status-card.status-RED { border-color: rgba(251, 113, 133, 0.65); background: rgba(251, 113, 133, 0.12); }
+.yolo-badge { display: inline-flex; align-items: center; gap: 0.45rem; font-weight: 800; font-size: 0.85rem; padding: 0.3rem 0.75rem; border-radius: 999px; letter-spacing: 0.04em; }
+.yolo-badge.GREEN { background: var(--ok); color: #052e1c; }
+.yolo-badge.ORANGE { background: var(--warn); color: #3b2500; }
+.yolo-badge.RED { background: var(--danger); color: #3a0410; }
+.yolo-compare-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; }
+.yolo-photo-frame { border-radius: var(--radius-sm); overflow: hidden; border: 1px solid var(--border); background: #070b17; max-height: 420px; display: flex; align-items: center; justify-content: center; }
+.yolo-photo-frame img { width: 100%; height: auto; display: block; object-fit: contain; max-height: 420px; }
+.toolbar-grid { display: grid; grid-template-columns: 1fr; gap: 0.75rem; }
+@media (min-width: 780px) { .toolbar-grid { grid-template-columns: 1.1fr 1.4fr 0.9fr 0.9fr; } }
 
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }

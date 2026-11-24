@@ -824,6 +824,54 @@ def create_app(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             ) from exc
 
+    @fastapi_app.get("/api/attendance/sessions/{lesson_id}/export")
+    async def export_attendance_spreadsheet_endpoint(
+        lesson_id: str,
+        request: Request,
+        format: str = Query(default="csv"),
+    ) -> Response:
+        """
+        Purpose:
+            Lecturer-protected endpoint to export a lesson's complete student
+            attendance spreadsheet as either a UTF-8-BOM CSV (`.csv`) or an
+            Excel workbook (`.xlsx`).
+        Inputs:
+            lesson_id (str): Target lesson session identifier.
+            request (Request): Incoming FastAPI request (requires Lecturer JWT).
+            format (str): Export format (`"csv"` or `"xlsx"`).
+        Outputs:
+            Response: Binary file download attachment response.
+        """
+        svc: AuthService = request.app.state.auth_service
+        svc.require_lecturer_claims(request)
+
+        mgr: AttendanceManager = request.app.state.attendance_manager
+        fmt = format.strip().lower()
+        clean_lesson = lesson_id.strip() or "lesson"
+
+        if fmt == "csv":
+            csv_bytes = mgr.export_attendance_csv(clean_lesson)
+            return Response(
+                content=csv_bytes,
+                media_type="text/csv; charset=utf-8",
+                headers={
+                    "Content-Disposition": f'attachment; filename="attendance_{clean_lesson}.csv"'
+                },
+            )
+        if fmt in {"xlsx", "excel"}:
+            xlsx_bytes = mgr.export_attendance_xlsx(clean_lesson)
+            return Response(
+                content=xlsx_bytes,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={
+                    "Content-Disposition": f'attachment; filename="attendance_{clean_lesson}.xlsx"'
+                },
+            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported export format. Use format=csv or format=xlsx.",
+        )
+
     @fastapi_app.post("/api/attendance/headcount", response_class=JSONResponse)
     async def analyze_classroom_photo_endpoint(
         request: Request,
