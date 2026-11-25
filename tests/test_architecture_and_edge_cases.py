@@ -68,6 +68,7 @@ EXPECTED_CLASS_METHODS: dict[type, set[str]] = {
         "verify_password",
         "create_jwt_token",
         "verify_jwt_token",
+        "seed_default_lecturer",
         "register_lecturer",
         "login_lecturer",
         "authenticate_student",
@@ -80,6 +81,7 @@ EXPECTED_CLASS_METHODS: dict[type, set[str]] = {
         "_resolve_column_indices",
         "parse_excel_rows",
         "import_from_excel",
+        "ensure_roster_seeded",
         "list_students",
         "get_student",
     },
@@ -98,12 +100,14 @@ EXPECTED_CLASS_METHODS: dict[type, set[str]] = {
         "verify_qr_token",
         "check_device_cooldown",
         "record_device_cooldown",
+        "reset_all_device_cooldowns",
         "submit_qr_checkin",
         "set_manual_attendance",
         "get_lesson_attendance_report",
         "_format_timestamp_iso",
         "export_attendance_csv",
         "export_attendance_xlsx",
+        "get_student_attendance_history",
     },
     PhotoHeadCounter: {
         "_get_model",
@@ -112,6 +116,7 @@ EXPECTED_CLASS_METHODS: dict[type, set[str]] = {
         "_annotate_image",
         "_run_yolo_person_detection",
         "analyze_classroom_photo",
+        "reset_headcount",
     },
     PollService: {
         "_format_poll",
@@ -129,25 +134,33 @@ EXPECTED_CLASS_METHODS: dict[type, set[str]] = {
     },
     GeminiClient: {
         "mask_api_key",
+        "_build_genai_client",
         "resolve_credentials",
         "get_settings",
         "update_settings",
         "_extract_json_dict",
+        "_classify_fallback_error",
+        "_build_youtube_part",
         "generate_structured_json",
     },
     VideoSummarizer: {
-        "validate_mp4_upload",
+        "validate_youtube_url",
+        "_fetch_youtube_title",
+        "_fetch_youtube_transcript",
         "_build_prompt",
-        "_build_fallback_summary",
+        "_normalize_key_concepts",
         "summarize_video",
         "list_summaries",
+        "delete_summary",
     },
     HomeworkReviewer: {
         "is_review_released",
+        "_extract_docx_text",
+        "_extract_zip_text",
         "validate_and_extract_pdf_text",
+        "extract_public_git_repo_text",
         "create_assignment",
         "end_submission_now",
-        "_build_individual_review_fallback",
         "_generate_peer_comparison",
         "submit_homework_pdf",
         "get_student_review_and_comparison",
@@ -273,7 +286,7 @@ def test_domain_services_boundary_and_negative_edge_cases() -> None:
         hw.create_assignment("Bad Deadline", "Desc", deadline_ts=0)
 
     valid_hw = hw.create_assignment("Valid HW", "Desc", deadline_ts=1_900_000_000)
-    with pytest.raises(ValueError, match="No PDF submission found"):
+    with pytest.raises(ValueError, match="No homework submission found"):
         hw.get_student_review_and_comparison(
             valid_hw["assignment_id"], "stu_never_submitted"
         )
@@ -309,4 +322,10 @@ def test_all_required_markdown_deliverables_and_deployment_configs_exist() -> No
         full_path = project_root / rel_path
         assert full_path.is_file(), f"Missing required deliverable: {rel_path}"
         assert full_path.stat().st_size > 50, f"Deliverable is unexpectedly empty: {rel_path}"
+
+    readme_text = (project_root / "README.md").read_text(encoding="utf-8")
+    assert r".\venv\Scripts\Activate.ps1" in readme_text
+    assert "source venv/Scripts/activate" in readme_text
+    assert "source venv/bin/activate" in readme_text
+
 

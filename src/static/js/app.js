@@ -46,10 +46,10 @@ function renderLanding() {
         el('section', { class: 'hero' }, [
             el('span', { class: 'chip ok live' }, [el('span', { class: 'dot' }), 'Smart classroom platform']),
             el('h1', { style: 'margin-top:1rem' }, ['Your ', el('span', { class: 'gradient-text' }, 'AI teaching assistant')]),
-            el('p', {}, 'Rotating-QR attendance, live polls, class feedback and AI summaries — built for a 10-minute classroom demo.'),
+            el('p', {}, 'GPS-geofenced QR attendance, YOLO headcount, live polls, class feedback, and Gemini AI summaries — built for a 10-minute classroom demo.'),
         ]),
         el('div', { class: 'role-grid' }, [
-            roleCard('cap', "I'm a lecturer", 'Start attendance, show the rotating QR and manage your class.', '#/lecturer'),
+            roleCard('cap', "I'm a lecturer", 'Start attendance, project the session QR, and manage your class.', '#/lecturer'),
             roleCard('user', "I'm a student", 'Sign in with your roster email. To check in, scan the lecturer\'s QR code.', '#/student'),
         ]),
     );

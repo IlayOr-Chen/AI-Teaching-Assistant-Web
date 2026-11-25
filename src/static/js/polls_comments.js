@@ -37,7 +37,7 @@ export function renderPollsTab(container, ctx) {
      */
     const renderPollCard = (poll) => {
         const hasVoted = poll.viewer_vote !== null && poll.viewer_vote !== undefined;
-        const canVote = !isLecturer && poll.active && !hasVoted;
+        const canVote = !isLecturer && poll.active;
 
         const optionNodes = (poll.options || []).map((opt) => {
             const isSelected = poll.viewer_vote === opt.index;
@@ -54,7 +54,12 @@ export function renderPollsTab(container, ctx) {
             }, [
                 el('div', { class: 'row' }, [
                     el('strong', { dir: 'auto' }, opt.text),
-                    isSelected ? el('span', { class: 'chip ok' }, [el('span', { html: icon('check') }), 'Your vote']) : null,
+                    isSelected
+                        ? el('span', { class: 'chip ok' }, [
+                            el('span', { html: icon('check') }),
+                            canVote ? 'Selected — click again to unvote' : 'Your vote',
+                        ])
+                        : null,
                     el('span', { class: 'spacer' }),
                     el('span', { class: 'muted', style: 'font-variant-numeric:tabular-nums;font-weight:700' },
                         `${opt.percentage.toFixed(1)}% (${opt.count})`),
@@ -65,10 +70,16 @@ export function renderPollsTab(container, ctx) {
             if (canVote) {
                 const submitVote = async () => {
                     try {
-                        await api.post(`/api/polls/${encodeURIComponent(poll.poll_id)}/vote`, {
+                        const updated = await api.post(`/api/polls/${encodeURIComponent(poll.poll_id)}/vote`, {
                             option_index: opt.index,
                         });
-                        toast(`Vote recorded for "${opt.text}"!`, 'success', 2500);
+                        if (updated.vote_action === 'removed') {
+                            toast(`Removed your vote for "${opt.text}".`, 'info', 2300);
+                        } else if (updated.vote_action === 'switched') {
+                            toast(`Switched your vote to "${opt.text}"!`, 'success', 2300);
+                        } else {
+                            toast(`Vote recorded for "${opt.text}"!`, 'success', 2300);
+                        }
                         await refreshPolls();
                     } catch (err) {
                         toast(err.message, 'error');
@@ -113,7 +124,11 @@ export function renderPollsTab(container, ctx) {
                 lecturerControl,
             ]),
             el('h2', { dir: 'auto' }, poll.question),
-            canVote ? el('p', { class: 'faint' }, 'Tap an option below to cast your vote (one vote per poll):') : null,
+            canVote
+                ? el('p', { class: 'faint' }, hasVoted
+                    ? 'Selected — click your choice again to unvote, or pick another option to switch:'
+                    : 'Tap an option below to cast your vote:')
+                : null,
             el('div', { class: 'stack' }, optionNodes),
         ]);
     };

@@ -1,8 +1,9 @@
 /**
- * Purpose: Lecturer experience — login/register view and the dashboard (Overview + Live Attendance
- *          tabs with the animated rotating QR countdown ring, live check-in feed, same-network toggle).
+ * Purpose: Lecturer experience — restricted sign-in view and the dashboard (Overview, Live Attendance
+ *          with static session QR + Leaflet GPS geofence map, Roster & YOLO Headcount, Live Polls,
+ *          Comments, Video AI, and Homework Review tabs).
  * Inputs:  a root element and callbacks supplied by app.js.
- * Outputs: DOM rendered into the root. Later checkpoints append tabs in `buildLecturerTabs`.
+ * Outputs: DOM rendered into the root.
  */
 
 import { api } from './api.js';
@@ -18,70 +19,47 @@ import {
 /* ------------------------------------------------------------------ */
 
 /**
- * Purpose: Render the lecturer sign-in / registration screen (registration needs the access code).
+ * Purpose: Render the restricted lecturer sign-in screen (public self-registration is disabled;
+ *          lecturer accounts are configured strictly via backend environment configuration).
  * Inputs:  root (HTMLElement); handlers {onAuthenticated(user), onBack()}.
  * Outputs: void.
  */
 export function renderLecturerAuth(root, { onAuthenticated, onBack }) {
-    let mode = 'login';
     const shell = pageShell({
         rightSlot: [button('Back', { cls: 'ghost sm', onclick: onBack })],
     });
-    const formHost = el('div', { class: 'stack' });
 
     const field = (label, name, type, placeholder, autocomplete) => el('label', { class: 'field' }, [
         label,
         el('input', { name, type, placeholder, autocomplete, required: true }),
     ]);
 
-    const seg = el('div', { class: 'segmented', role: 'group', 'aria-label': 'Sign in or register' });
-    const loginBtn = el('button', { type: 'button', 'aria-pressed': 'true', onclick: () => setMode('login') }, 'Sign in');
-    const registerBtn = el('button', { type: 'button', 'aria-pressed': 'false', onclick: () => setMode('register') }, 'Register');
-    seg.append(loginBtn, registerBtn);
+    const submit = button('Sign in', { cls: 'primary lg block', type: 'submit' });
+    const form = el('form', { class: 'stack', autocomplete: 'on' }, [
+        field('Email', 'email', 'email', 'Enter your email', 'email'),
+        field('Password', 'password', 'password', 'Your password', 'current-password'),
+        submit,
+    ]);
 
-    const renderForm = () => {
-        const isRegister = mode === 'register';
-        const submit = button(isRegister ? 'Create lecturer account' : 'Sign in', { cls: 'primary lg block', type: 'submit' });
-        const form = el('form', { class: 'stack', autocomplete: 'on' }, [
-            isRegister ? field('Full name', 'full_name', 'text', 'Dr. Jane Cohen', 'name') : null,
-            field('Email', 'email', 'email', 'you@university.ac.il', 'email'),
-            field('Password', 'password', 'password', isRegister ? 'At least 6 characters' : 'Your password',
-                isRegister ? 'new-password' : 'current-password'),
-            isRegister ? field('Lecturer access code', 'access_code', 'password', 'Provided by the course admin', 'off') : null,
-            submit,
-        ]);
-        form.addEventListener('submit', (event) => {
-            event.preventDefault();
-            const data = Object.fromEntries(new FormData(form).entries());
-            withLoading(submit, async () => {
-                const result = await api.post(
-                    isRegister ? '/api/auth/lecturer/register' : '/api/auth/lecturer/login',
-                    data,
-                );
-                toast(`Welcome, ${result.user.full_name}!`, 'success');
-                onAuthenticated(result.user);
-            });
+    form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        const data = Object.fromEntries(new FormData(form).entries());
+        withLoading(submit, async () => {
+            const result = await api.post('/api/auth/lecturer/login', data);
+            toast(`Welcome, ${result.user.full_name}!`, 'success');
+            onAuthenticated(result.user);
         });
-        mount(formHost, form);
-        form.querySelector('input')?.focus();
-    };
-
-    function setMode(next) {
-        mode = next;
-        loginBtn.setAttribute('aria-pressed', String(mode === 'login'));
-        registerBtn.setAttribute('aria-pressed', String(mode === 'register'));
-        renderForm();
-    }
+    });
 
     shell.content.append(el('div', { class: 'auth-wrap stack' }, [
         el('div', { class: 'center' }, [
             el('h1', {}, ['Lecturer ', el('span', { class: 'gradient-text' }, 'sign in')]),
             el('p', { class: 'muted' }, 'Run attendance, polls and AI tools for your class.'),
         ]),
-        el('div', { class: 'card stack' }, [seg, formHost]),
+        el('div', { class: 'card stack' }, [form]),
     ]));
     mount(root, shell.root);
-    renderForm();
+    form.querySelector('input')?.focus();
 }
 
 /* ------------------------------------------------------------------ */
@@ -117,12 +95,12 @@ export function renderLecturerDashboard(root, ctx) {
 function buildLecturerTabs(ctx) {
     return [
         { id: 'overview', label: 'Overview', icon: 'grid', render: (c) => renderOverviewTab(c, ctx) },
-        { id: 'attendance', label: 'Live attendance', icon: 'qr', render: (c) => renderLiveAttendanceTab(c, ctx) },
-        { id: 'roster', label: 'Roster & YOLO Headcount', icon: 'table', render: (c) => renderRosterAndHeadcountTab(c, ctx) },
-        { id: 'polls', label: 'Live Polls', icon: 'poll', render: (c) => renderPollsTab(c, { ...ctx, role: 'lecturer' }) },
-        { id: 'comments', label: 'Comments & Suggestions', icon: 'message', render: (c) => renderCommentsTab(c, { ...ctx, role: 'lecturer' }) },
-        { id: 'video', label: 'MP4 Lecture Summary', icon: 'video', render: (c) => renderVideoSummaryTab(c, { ...ctx, role: 'lecturer' }) },
-        { id: 'homework', label: 'PDF Homework Review', icon: 'file', render: (c) => renderHomeworkTab(c, { ...ctx, role: 'lecturer' }) },
+        { id: 'attendance', label: 'Attendance', icon: 'qr', render: (c) => renderLiveAttendanceTab(c, ctx) },
+        { id: 'roster', label: 'Roster', icon: 'table', render: (c) => renderRosterAndHeadcountTab(c, ctx) },
+        { id: 'polls', label: 'Polls', icon: 'poll', render: (c) => renderPollsTab(c, { ...ctx, role: 'lecturer' }) },
+        { id: 'comments', label: 'Comments', icon: 'message', render: (c) => renderCommentsTab(c, { ...ctx, role: 'lecturer' }) },
+        { id: 'video', label: 'Video AI', icon: 'video', render: (c) => renderVideoSummaryTab(c, { ...ctx, role: 'lecturer' }) },
+        { id: 'homework', label: 'Homework', icon: 'file', render: (c) => renderHomeworkTab(c, { ...ctx, role: 'lecturer' }) },
     ];
 }
 
@@ -179,11 +157,11 @@ function renderOverviewTab(container, ctx) {
     const renderImport = (count) => {
         const fileInput = el('input', { type: 'file', accept: '.xlsx', class: 'hidden' });
         const uploadBtn = button('Upload roster (.xlsx)', { cls: 'primary', iconName: 'upload' });
-        const bundledBtn = button('Use bundled course roster', { cls: '' });
+        const bundledBtn = button('Sync from Course Excel', { cls: '', iconName: 'refresh' });
 
         const runImport = (btn, request) => withLoading(btn, async () => {
             const result = await request();
-            toast(`Imported ${result.total_imported} students (${result.unassigned_group_count} without a group).`, 'success');
+            toast(`Synced ${result.total_imported} students from Excel (${result.unassigned_group_count} without a group).`, 'success');
             await refresh();
         });
 
@@ -201,8 +179,8 @@ function renderOverviewTab(container, ctx) {
         mount(importHost, [
             count === 0
                 ? el('div', { class: 'banner warn' }, [el('span', { html: icon('alert') }), el('span', {}, 'No students yet. Import the course roster so students can check in by name.')])
-                : el('p', { class: 'muted' }, `${count} students are loaded. Re-importing replaces the roster.`),
-            el('div', { class: 'row' }, [uploadBtn, bundledBtn, fileInput]),
+                : el('p', { class: 'muted' }, `${count} students are loaded from assets/courseid_130158_participants.xlsx. Re-importing updates the roster.`),
+            el('div', { class: 'row' }, [bundledBtn, uploadBtn, fileInput]),
             el('p', { class: 'faint' }, 'Expected columns: שם פרטי, שם משפחה, דוא"ל, קבוצות (empty group cells are fine).'),
         ]);
     };
@@ -232,127 +210,225 @@ function renderOverviewTab(container, ctx) {
 /* Live attendance tab                                                 */
 /* ------------------------------------------------------------------ */
 
-const RING_RADIUS = 46;
-const RING_LENGTH = 2 * Math.PI * RING_RADIUS;
-
 /**
- * Purpose: Build one QR display (animated countdown ring + QR image + seconds chip).
+ * Purpose: Build one centered static session QR display (elevated white frame + QR image + loader).
  *          Used for both the dashboard card and the full-screen projector overlay.
  * Inputs:  none.
- * Outputs: {wrap, img, ring, countdown} DOM references.
+ * Outputs: {wrap, img, loading} DOM references.
  */
 function buildQrDisplay() {
-    const ring = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    ring.setAttribute('class', 'ring-fg');
-    ring.setAttribute('cx', '50');
-    ring.setAttribute('cy', '50');
-    ring.setAttribute('r', String(RING_RADIUS));
-    ring.style.strokeDasharray = String(RING_LENGTH);
-    ring.style.strokeDashoffset = String(RING_LENGTH);
-
-    const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    bg.setAttribute('class', 'ring-bg');
-    bg.setAttribute('cx', '50');
-    bg.setAttribute('cy', '50');
-    bg.setAttribute('r', String(RING_RADIUS));
-
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('class', 'qr-ring');
-    svg.setAttribute('viewBox', '0 0 100 100');
-    svg.append(bg, ring);
-
-    const img = el('img', { alt: 'Rotating attendance QR code', width: 400, height: 400 });
+    const img = el('img', { alt: 'Session attendance QR code', width: 360, height: 360 });
     const loading = el('div', { class: 'qr-loading' }, el('span', { class: 'spinner', style: 'width:28px;height:28px;border-color:#cbd5e1;border-top-color:#334155' }));
     const frame = el('div', { class: 'qr-frame' }, [img, loading]);
-    const countdown = el('span', { class: 'qr-countdown', 'aria-live': 'off' }, '…');
-    const wrap = el('div', { class: 'qr-ring-wrap' }, [svg, frame, countdown]);
-    return { wrap, img, ring, countdown, loading };
+    const wrap = el('div', { class: 'qr-ring-wrap' }, [frame]);
+    return { wrap, img, loading };
 }
 
 /**
- * Purpose: Live attendance tab. Shows a setup form when no session is live, otherwise the rotating
- *          QR, same-network toggle, live counter and check-in feed.
+ * Purpose: Live attendance tab. Shows a setup form with the interactive Leaflet geofence map
+ *          when no session is live, otherwise the centered static session QR, GPS geofencing
+ *          toggle, cooldown reset button, live counter and check-in feed.
  * Inputs:  container (HTMLElement); ctx (dashboard context).
- * Outputs: cleanup function stopping timers, animation frames and the projector overlay.
+ * Outputs: cleanup function stopping polling timers, Leaflet map, and the projector overlay.
  */
 function renderLiveAttendanceTab(container, ctx) {
     let disposed = false;
     let stopActive = null; // cleanup for the currently displayed active session
+    let stopSetupMap = null; // cleanup for the Leaflet setup map instance
 
     const cleanup = () => {
         disposed = true;
+        if (stopSetupMap) { stopSetupMap(); stopSetupMap = null; }
         if (stopActive) stopActive();
     };
 
-    const showSetup = async () => {
+    /**
+     * Purpose: Build a reusable "Reset 15-Min Device Cooldowns" button calling the protected endpoint.
+     * Inputs:  extraCls (string) optional button CSS modifiers.
+     * Outputs: HTMLButtonElement.
+     */
+    const buildResetCooldownsButton = (extraCls = 'block') => {
+        const btn = button('Reset 15-Min Device Cooldowns', { cls: `ghost ${extraCls}`.trim(), iconName: 'refresh' });
+        btn.addEventListener('click', () => withLoading(btn, async () => {
+            const res = await api.post('/api/attendance/reset-cooldowns');
+            toast(res.message || 'All 15-minute device cooldowns have been reset. Students can re-scan immediately.', 'success', 3800);
+        }));
+        return btn;
+    };
+
+    const showSetup = async ({ forceSetup = false } = {}) => {
         if (stopActive) { stopActive(); stopActive = null; }
+        if (stopSetupMap) { stopSetupMap(); stopSetupMap = null; }
         mount(container, el('div', { class: 'card' }, el('span', { class: 'spinner' })));
         let sessions = [];
-        let net = { ip: '', source: '' };
+        let defaultGeofenceRadius = 100;
+        let defaultEnforceGeofence = true;
         try {
-            [sessions, net] = await Promise.all([
-                api.get('/api/attendance/sessions').then((r) => r.sessions),
-                api.get('/api/network-info'),
-            ]);
+            const res = await api.get('/api/attendance/sessions');
+            sessions = res.sessions || [];
+            if (Number.isFinite(Number(res.default_geofence_radius_meters)) && Number(res.default_geofence_radius_meters) >= 10) {
+                defaultGeofenceRadius = Number(res.default_geofence_radius_meters);
+            }
+            if (typeof res.default_enforce_geofence === 'boolean') {
+                defaultEnforceGeofence = res.default_enforce_geofence;
+            }
         } catch (err) {
             toast(err.message, 'error');
         }
         if (disposed) return;
 
         const live = sessions.filter((s) => s.active).sort((a, b) => b.started_at - a.started_at)[0];
-        if (live) { showActive(live, null); return; }
+        if (live && !forceSetup) { showActive(live, null); return; }
 
         const highest = sessions.reduce((max, s) => {
             const m = /^lesson_(\d+)$/.exec(s.lesson_id || '');
             return m ? Math.max(max, Number(m[1])) : max;
         }, 0);
+        const suggestedNextNo = highest + 1;
 
-        const lessonNo = el('input', { type: 'number', min: 1, max: 99, value: highest + 1, required: true, name: 'lesson_no' });
+        let selectedLat = 32.104400;
+        let selectedLng = 35.207800;
+        let selectedRadius = defaultGeofenceRadius;
+
+        const lessonModeSelect = el(
+            'select',
+            { name: 'lesson_selector', 'aria-label': 'Select existing lesson or create new lesson' },
+            [
+                el('option', { value: '__new__', selected: true }, `+ Create & Open New Lesson (Lesson ${suggestedNextNo})`),
+                ...sessions.map((s) => el(
+                    'option',
+                    { value: s.lesson_id },
+                    `${s.lesson_title || s.lesson_id} (${s.lesson_id})${s.active ? ' · LIVE' : ' · Reopen / Resume'}`,
+                )),
+            ],
+        );
+
+        const lessonNo = el('input', { type: 'number', min: 1, max: 99, value: suggestedNextNo, required: true, name: 'lesson_no' });
         const title = el('input', { type: 'text', maxlength: 80, placeholder: 'Optional, e.g. Design Patterns', name: 'title' });
-        const rotation = el('select', { name: 'rotation' }, [6, 8, 10, 12, 15].map((n) => el('option', { value: n, selected: n === 8 }, `${n} seconds`)));
-        const radiusInput = el('input', { type: 'number', min: 30, max: 500, value: 100, required: true, name: 'geofence_radius_meters' });
-        const latInput = el('input', { type: 'text', value: '32.104400', placeholder: 'e.g. 32.104400', name: 'classroom_lat' });
-        const lngInput = el('input', { type: 'text', value: '35.207800', placeholder: 'e.g. 35.207800', name: 'classroom_lng' });
-        const enforce = el('input', { type: 'checkbox', checked: true, name: 'enforce_geofence' });
-        const detectGpsBtn = button('Use browser GPS', { cls: 'sm', iconName: 'wifi' });
+        const enforce = el('input', { type: 'checkbox', checked: defaultEnforceGeofence, name: 'enforce_geofence' });
+        const detectGpsBtn = button('Use My Current Location', { cls: 'sm primary', iconName: 'wifi' });
         const presetGpsBtn = button('Ariel Campus preset', { cls: 'sm ghost' });
+        const resetCooldownSetupBtn = buildResetCooldownsButton('sm');
+        const resumeLiveBtn = live
+            ? button(`Resume Live (${live.lesson_title || live.lesson_id})`, {
+                cls: 'sm',
+                iconName: 'qr',
+                onclick: () => showActive(live, null),
+            })
+            : null;
         const start = button('Start attendance session', { cls: 'primary lg block', type: 'submit', iconName: 'play' });
+
+        /* ----- Radius selector pills (30m / 50m / 100m + custom .env default if different) ----- */
+        const RADIUS_OPTIONS = [30, 50, 100];
+        const radiusPillValues = RADIUS_OPTIONS.includes(defaultGeofenceRadius)
+            ? RADIUS_OPTIONS
+            : [...RADIUS_OPTIONS, defaultGeofenceRadius].sort((a, b) => a - b);
+        let mapInstance = null;
+        let mapMarker = null;
+        let mapCircle = null;
+
+        const mapCoordsCaption = el(
+            'p',
+            { class: 'faint' },
+            `Selected classroom pin: ${selectedLat.toFixed(6)}, ${selectedLng.toFixed(6)} · Geofence radius: ${selectedRadius}m (click map or drag pin to move)`,
+        );
+
+        const updateCoordsCaption = () => {
+            mapCoordsCaption.textContent = `Selected classroom pin: ${selectedLat.toFixed(6)}, ${selectedLng.toFixed(6)} · Geofence radius: ${selectedRadius}m (click map or drag pin to move)`;
+        };
+
+        const pillButtons = radiusPillValues.map((r) => {
+            const pill = el('button', {
+                type: 'button',
+                class: `radius-pill ${r === selectedRadius ? 'active' : ''}`.trim(),
+                'data-radius': String(r),
+            }, `${r}m`);
+            pill.addEventListener('click', () => setRadiusMeters(r));
+            return pill;
+        });
+
+        const setRadiusMeters = (r) => {
+            selectedRadius = Math.max(10, Math.min(5000, Number(r) || defaultGeofenceRadius));
+            for (const pill of pillButtons) {
+                pill.classList.toggle('active', Number(pill.dataset.radius) === selectedRadius);
+            }
+            if (mapCircle) {
+                mapCircle.setRadius(selectedRadius);
+            }
+            updateCoordsCaption();
+        };
+
+        const setPinCoordinates = (lat, lng, recenter = true) => {
+            const safeLat = Number(lat);
+            const safeLng = Number(lng);
+            if (!Number.isFinite(safeLat) || !Number.isFinite(safeLng)) return;
+            selectedLat = Number(safeLat.toFixed(6));
+            selectedLng = Number(safeLng.toFixed(6));
+            if (mapMarker) mapMarker.setLatLng([selectedLat, selectedLng]);
+            if (mapCircle) mapCircle.setLatLng([selectedLat, selectedLng]);
+            if (mapInstance && recenter) {
+                mapInstance.setView([selectedLat, selectedLng], Math.max(mapInstance.getZoom(), 17));
+            }
+            updateCoordsCaption();
+        };
+
+        lessonModeSelect.addEventListener('change', () => {
+            const val = lessonModeSelect.value;
+            if (val === '__new__') {
+                lessonNo.value = String(suggestedNextNo);
+                title.value = '';
+                setRadiusMeters(defaultGeofenceRadius);
+                return;
+            }
+            const chosen = sessions.find((s) => s.lesson_id === val);
+            if (!chosen) return;
+            const m = /^lesson_(\d+)$/.exec(chosen.lesson_id || '');
+            if (m) lessonNo.value = m[1];
+            title.value = chosen.lesson_title || '';
+            if (chosen.classroom_lat !== null && chosen.classroom_lat !== undefined && chosen.classroom_lng !== null && chosen.classroom_lng !== undefined) {
+                setPinCoordinates(chosen.classroom_lat, chosen.classroom_lng, true);
+            }
+            if (chosen.geofence_radius_meters) {
+                setRadiusMeters(chosen.geofence_radius_meters);
+            }
+            enforce.checked = chosen.enforce_geofence !== false;
+        });
 
         detectGpsBtn.addEventListener('click', () => {
             if (!navigator.geolocation) {
-                toast('Browser Geolocation is not available; enter coordinates manually.', 'warning');
+                toast('Browser Geolocation is not available; click on the map to position the classroom pin.', 'warning');
                 return;
             }
             navigator.geolocation.getCurrentPosition(
                 (pos) => {
-                    latInput.value = pos.coords.latitude.toFixed(6);
-                    lngInput.value = pos.coords.longitude.toFixed(6);
-                    toast(`Captured classroom GPS (${latInput.value}, ${lngInput.value}).`, 'success');
+                    setPinCoordinates(pos.coords.latitude, pos.coords.longitude, true);
+                    toast(`Captured classroom GPS (${selectedLat.toFixed(6)}, ${selectedLng.toFixed(6)}).`, 'success');
                 },
                 (err) => {
-                    toast(`Could not read browser GPS (${err.message}). Using manual coordinate fallback.`, 'warning');
+                    toast(`Could not read browser GPS (${err.message}). Click on the map to place the pin manually.`, 'warning');
                 },
                 { enableHighAccuracy: true, timeout: 8000 },
             );
         });
         presetGpsBtn.addEventListener('click', () => {
-            latInput.value = '32.104400';
-            lngInput.value = '35.207800';
+            setPinCoordinates(32.104400, 35.207800, true);
             toast('Applied Ariel University lecture hall coordinates.', 'info', 2200);
         });
 
+        const mapHost = el('div', {
+            class: 'geofence-map-container',
+            id: 'lecturer-geofence-map',
+            'aria-label': 'Interactive classroom geofence map',
+        });
+
         const form = el('form', { class: 'stack' }, [
-            el('div', { class: 'grid', style: 'grid-template-columns:1fr 1fr' }, [
+            sessions.length
+                ? el('label', { class: 'field' }, ['Select Existing Lesson or Open a New Lesson', lessonModeSelect])
+                : null,
+            el('div', { class: 'grid', style: 'grid-template-columns:1fr 2fr' }, [
                 el('label', { class: 'field' }, ['Lesson number', lessonNo]),
-                el('label', { class: 'field' }, ['QR rotates every', rotation]),
+                el('label', { class: 'field' }, ['Title', title]),
             ]),
-            el('label', { class: 'field' }, ['Title', title]),
-            el('div', { class: 'grid', style: 'grid-template-columns:1fr 1fr 1fr' }, [
-                el('label', { class: 'field' }, ['Classroom Lat', latInput]),
-                el('label', { class: 'field' }, ['Classroom Lng', lngInput]),
-                el('label', { class: 'field' }, ['Geofence Radius (m)', radiusInput]),
-            ]),
-            el('div', { class: 'row' }, [detectGpsBtn, presetGpsBtn]),
             el('label', { class: 'switch' }, [
                 enforce, el('span', { class: 'track' }),
                 el('span', { class: 'switch-text' }, [
@@ -367,17 +443,14 @@ function renderLiveAttendanceTab(container, ctx) {
             event.preventDefault();
             const n = Number(lessonNo.value);
             if (!Number.isInteger(n) || n < 1) { toast('Enter a valid lesson number.', 'warning'); return; }
-            const parsedLat = latInput.value.trim() ? Number(latInput.value.trim()) : null;
-            const parsedLng = lngInput.value.trim() ? Number(lngInput.value.trim()) : null;
             withLoading(start, async () => {
                 const session = await api.post('/api/attendance/sessions', {
                     lesson_id: `lesson_${n}`,
                     lesson_title: title.value.trim() || `Lesson ${n}`,
-                    classroom_lat: Number.isFinite(parsedLat) ? parsedLat : null,
-                    classroom_lng: Number.isFinite(parsedLng) ? parsedLng : null,
-                    geofence_radius_meters: Number(radiusInput.value) || 100,
+                    classroom_lat: selectedLat,
+                    classroom_lng: selectedLng,
+                    geofence_radius_meters: selectedRadius,
                     enforce_geofence: enforce.checked,
-                    rotation_seconds: Number(rotation.value),
                 });
                 toast(`${session.lesson_title} is live.`, 'success');
                 showActive(session, session.geofence_warning);
@@ -386,23 +459,105 @@ function renderLiveAttendanceTab(container, ctx) {
 
         mount(container, el('div', { class: 'grid grid-2' }, [
             el('div', { class: 'card stack' }, [
-                el('div', { class: 'card-title' }, [el('span', { html: icon('qr') }), el('h2', {}, 'Start a lesson')]),
+                el('div', { class: 'row' }, [
+                    el('div', { class: 'card-title', style: 'margin-bottom:0' }, [
+                        el('span', { html: icon('qr') }),
+                        el('h2', {}, 'Start or Switch a Lesson'),
+                    ]),
+                    el('span', { class: 'spacer' }),
+                    resumeLiveBtn,
+                ]),
                 form,
+                el('div', { class: 'row', style: 'padding-top:0.4rem;border-top:1px solid var(--border)' }, [
+                    resetCooldownSetupBtn,
+                ]),
             ]),
             el('div', { class: 'card stack' }, [
-                el('div', { class: 'card-title' }, [el('span', { html: icon('shield') }), el('h2', {}, 'GPS Geofencing (Haversine)')]),
-                el('p', { class: 'muted' }, 'Unlike Wi-Fi IP checks—which fail when university networks use multi-IP NAT or when students use 4G/5G—GPS Geofencing verifies physical classroom proximity directly in meters.'),
-                el('div', { class: 'banner info' }, [el('span', { html: icon('info') }), el('span', {}, 'Browser Geolocation requires HTTPS (provided automatically by Cloudflare Tunnel and Render) or localhost.')]),
+                el('div', { class: 'card-title' }, [el('span', { html: icon('shield') }), el('h2', {}, 'Interactive Classroom Geofence Map')]),
+                el('div', { class: 'row' }, [
+                    detectGpsBtn,
+                    presetGpsBtn,
+                    el('span', { class: 'spacer' }),
+                    el('div', { class: 'radius-pills', role: 'group', 'aria-label': 'Geofence radius selector' }, pillButtons),
+                ]),
+                mapHost,
+                mapCoordsCaption,
             ]),
         ]));
+
+        /* ----- Initialize Leaflet.js + OpenStreetMap Map & Live Circle ----- */
+        if (typeof window !== 'undefined' && window.L) {
+            const L = window.L;
+
+            mapInstance = L.map(mapHost, {
+                center: [selectedLat, selectedLng],
+                zoom: 17,
+                zoomControl: true,
+            });
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '&copy; OpenStreetMap contributors',
+            }).addTo(mapInstance);
+
+            mapMarker = L.marker([selectedLat, selectedLng], { draggable: true }).addTo(mapInstance);
+            mapCircle = L.circle([selectedLat, selectedLng], {
+                radius: selectedRadius,
+                color: '#22d3ee',
+                fillColor: '#7c8cff',
+                fillOpacity: 0.22,
+                weight: 2,
+            }).addTo(mapInstance);
+
+            mapInstance.on('click', (e) => {
+                setPinCoordinates(e.latlng.lat, e.latlng.lng, false);
+            });
+            mapMarker.on('drag', (e) => {
+                const pos = e.target.getLatLng();
+                if (mapCircle) mapCircle.setLatLng(pos);
+                selectedLat = Number(pos.lat.toFixed(6));
+                selectedLng = Number(pos.lng.toFixed(6));
+                updateCoordsCaption();
+            });
+            mapMarker.on('dragend', (e) => {
+                const pos = e.target.getLatLng();
+                setPinCoordinates(pos.lat, pos.lng, false);
+            });
+
+            // Important Leaflet fix: call map.invalidateSize() whenever the tab/panel becomes visible
+            // so OpenStreetMap tiles never render half-gray.
+            const refreshMapSize = () => {
+                if (mapInstance && !disposed) {
+                    mapInstance.invalidateSize();
+                }
+            };
+            requestAnimationFrame(refreshMapSize);
+            const t1 = setTimeout(refreshMapSize, 120);
+            const t2 = setTimeout(refreshMapSize, 350);
+            let resizeObs = null;
+            if (typeof ResizeObserver !== 'undefined') {
+                resizeObs = new ResizeObserver(() => refreshMapSize());
+                resizeObs.observe(mapHost);
+            }
+
+            stopSetupMap = () => {
+                clearTimeout(t1);
+                clearTimeout(t2);
+                if (resizeObs) resizeObs.disconnect();
+                if (mapInstance) {
+                    mapInstance.remove();
+                    mapInstance = null;
+                }
+            };
+        }
     };
 
     /**
-     * Purpose: Render the live session view and start the QR rotation + polling loops.
+     * Purpose: Render the live session view with the centered static session QR code and live feed polling.
      * Inputs:  session (object) active attendance session; ipWarning (string | null).
      * Outputs: void (registers cleanup in `stopActive`).
      */
     const showActive = (session, ipWarning) => {
+        if (stopSetupMap) { stopSetupMap(); stopSetupMap = null; }
         if (stopActive) stopActive();
         const lessonId = session.lesson_id;
         const mainQr = buildQrDisplay();
@@ -411,7 +566,7 @@ function renderLiveAttendanceTab(container, ctx) {
 
         const urlCode = el('code', {}, 'Generating link…');
         let currentUrl = '';
-        const copyBtn = button('Copy', { cls: 'sm', iconName: 'copy', onclick: async () => {
+        const copyBtn = button('Copy Link', { cls: 'sm', iconName: 'copy', onclick: async () => {
             if (!currentUrl) return;
             toast((await copyText(currentUrl)) ? 'Check-in link copied.' : 'Could not copy the link.', 'info', 2200);
         } });
@@ -420,59 +575,34 @@ function renderLiveAttendanceTab(container, ctx) {
             button('Close', { cls: 'projector-close', iconName: 'x', onclick: () => setProjector(false) }),
             el('h2', {}, session.lesson_title || lessonId),
             projectorQr.wrap,
-            el('p', { class: 'muted' }, 'Scan with your phone camera to check in'),
+            el('p', { class: 'muted' }, 'Scan with your phone camera to check in — protected by GPS Geofencing & 15-min device cooldown.'),
         ]);
         document.body.append(overlay);
         const setProjector = (open) => overlay.classList.toggle('open', open);
         const onKey = (e) => { if (e.key === 'Escape') setProjector(false); };
         document.addEventListener('keydown', onKey);
 
-        /* ----- QR rotation loop (requestAnimationFrame) ----- */
-        let cycleStart = -Infinity;
-        let cycleMs = (session.rotation_seconds || 12) * 1000;
-        let fetching = false;
-        let rafId = 0;
-
+        /* ----- Load static session QR code once ----- */
         const fetchQr = async () => {
-            fetching = true;
             try {
                 const data = await api.get(`/api/attendance/sessions/${encodeURIComponent(lessonId)}/qr`);
                 if (disposed) return;
-                cycleStart = performance.now();
-                cycleMs = data.ttl_seconds * 1000;
                 currentUrl = data.checkin_url;
                 urlCode.textContent = data.checkin_url;
                 for (const d of displays) {
                     d.img.src = data.qr_image_data_url;
                     d.loading.classList.add('hidden');
                     d.img.classList.remove('swap');
-                    void d.img.offsetWidth; // restart the swap animation
+                    void d.img.offsetWidth;
                     d.img.classList.add('swap');
                 }
             } catch (err) {
                 if (err.status === 401) { toast('Your session expired. Please sign in again.', 'error'); stop(); return; }
                 if (err.status === 400) { toast(err.message, 'warning'); stop(); showSetup(); return; }
                 toast(err.message, 'error');
-                cycleStart = performance.now() - cycleMs + 3000; // retry in ~3 seconds
-            } finally {
-                fetching = false;
             }
         };
-
-        const tick = (now) => {
-            const remain = Math.max(0, cycleMs - (now - cycleStart));
-            const fraction = Number.isFinite(cycleStart) ? remain / cycleMs : 0;
-            const secs = Math.ceil(remain / 1000);
-            for (const d of displays) {
-                d.ring.style.strokeDashoffset = String(RING_LENGTH * (1 - fraction));
-                d.ring.classList.toggle('warn', remain <= 5000 && remain > 2500);
-                d.ring.classList.toggle('danger', remain <= 2500);
-                d.countdown.textContent = fetching || !Number.isFinite(cycleStart) ? '…' : `${secs}s`;
-            }
-            if (remain <= 0 && !fetching && !disposed) fetchQr();
-            rafId = requestAnimationFrame(tick);
-        };
-        rafId = requestAnimationFrame(tick);
+        fetchQr();
 
         /* ----- Live counter + feed ----- */
         const countNode = el('span', { class: 'counter-big' }, '0');
@@ -536,7 +666,6 @@ function renderLiveAttendanceTab(container, ctx) {
         const pollId = setInterval(pollReport, 3500);
 
         function stop() {
-            cancelAnimationFrame(rafId);
             clearInterval(pollId);
             document.removeEventListener('keydown', onKey);
             overlay.remove();
@@ -556,6 +685,16 @@ function renderLiveAttendanceTab(container, ctx) {
                 toast(err.message, 'error');
             }
         });
+
+        const switchLessonBtn = button('Switch / Open Another Lesson', {
+            cls: 'block',
+            iconName: 'grid',
+            onclick: () => {
+                stop();
+                showSetup({ forceSetup: true });
+            },
+        });
+        const resetCooldownActiveBtn = buildResetCooldownsButton('block');
 
         let confirmTimer = 0;
         const closeBtn = button('Close session', { cls: 'danger block', iconName: 'stop' });
@@ -582,15 +721,16 @@ function renderLiveAttendanceTab(container, ctx) {
 
         mount(container, el('div', { class: 'grid grid-2' }, [
             el('div', { class: 'card qr-stage' }, [
-                el('div', { class: 'row', style: 'width:100%' }, [
-                    el('h2', {}, session.lesson_title || lessonId),
-                    el('span', { class: 'chip ok live' }, [el('span', { class: 'dot' }), 'LIVE']),
-                    el('span', { class: 'spacer' }),
+                el('div', { class: 'row', style: 'width:100%;justify-content:space-between' }, [
+                    el('div', { class: 'row' }, [
+                        el('h2', {}, session.lesson_title || lessonId),
+                        el('span', { class: 'chip ok live' }, [el('span', { class: 'dot' }), 'LIVE']),
+                    ]),
                     button('Projector mode', { cls: 'sm', iconName: 'maximize', onclick: () => setProjector(true) }),
                 ]),
                 mainQr.wrap,
                 el('div', { class: 'qr-url' }, [urlCode, copyBtn]),
-                el('p', { class: 'faint' }, 'The code changes automatically (~8s); older scans stay valid for a short grace window (~15s).'),
+                el('p', { class: 'faint qr-helper-text' }, 'Scan to check in — protected by GPS Geofencing & 15-min device cooldown.'),
             ]),
             el('div', { class: 'stack' }, [
                 ipWarning ? el('div', { class: 'banner warn' }, [el('span', { html: icon('alert') }), el('span', {}, ipWarning)]) : null,
@@ -606,6 +746,8 @@ function renderLiveAttendanceTab(container, ctx) {
                         enforceInput, el('span', { class: 'track' }),
                         el('span', { class: 'switch-text' }, [el('strong', {}, 'Enforce GPS Geofencing'), el('span', { class: 'faint' }, coordsLabel)]),
                     ]),
+                    switchLessonBtn,
+                    resetCooldownActiveBtn,
                     closeBtn,
                 ]),
             ]),
@@ -622,12 +764,13 @@ function renderLiveAttendanceTab(container, ctx) {
 
 /**
  * Purpose: Render the full Attendance Management & YOLO Classroom Headcount tab:
- *          1) Lesson selector, search/group/status filters, and CSV / Excel (.xlsx) export buttons,
- *          2) YOLO classroom photo upload + one-click `/assets/p3.jpeg` test + side-by-side
- *             Detected vs. Self-Registered counts + visual GREEN / ORANGE / RED confidence card
- *             + annotated bounding-box photo display,
- *          3) Complete student roster table (Full Name, Email, Group, Status, Method, Timestamp)
- *             with one-click manual Present/Absent toggle per student.
+ *          1) Unified Lesson Selector card at the very top so the selected lesson controls
+ *             both YOLO Headcount and the Student Roster table below,
+ *          2) YOLO classroom photo upload + Reset YOLO button + persisted annotated
+ *             bounding-box photo + side-by-side Detected vs. Self-Registered counts +
+ *             GREEN / ORANGE / RED confidence card,
+ *          3) Complete student roster table with search/group/status filters, CSV/Excel export,
+ *             and one-click manual Present/Absent toggle per student.
  * Inputs:  container (HTMLElement); ctx (dashboard context).
  * Outputs: void.
  */
@@ -637,6 +780,7 @@ function renderRosterAndHeadcountTab(container, ctx) {
     let latestYoloReport = null;
 
     const lessonSelect = el('select', { name: 'lesson_select', 'aria-label': 'Select lesson' });
+    const lessonStatusChip = el('span', { class: 'chip' }, 'Loading lesson…');
     const searchInput = el('input', { type: 'search', placeholder: 'Search name or email…', 'aria-label': 'Search student' });
     const groupSelect = el('select', { 'aria-label': 'Filter by group' }, [
         el('option', { value: '' }, 'All groups'),
@@ -656,6 +800,11 @@ function renderRosterAndHeadcountTab(container, ctx) {
     const tableBody = el('tbody');
     const tableSummary = el('span', { class: 'faint' }, 'Loading roster…');
 
+    const photoInput = el('input', { type: 'file', accept: '.jpg,.jpeg,.png,.webp', class: 'hidden' });
+    const uploadPhotoBtn = button('Upload classroom photo', { cls: 'primary', iconName: 'camera' });
+    const resetYoloBtn = button('Reset YOLO', { cls: 'ghost danger sm', iconName: 'trash' });
+    resetYoloBtn.disabled = true;
+
     /**
      * Purpose: Trigger a browser download of the CSV or Excel (.xlsx) attendance export.
      * Inputs:  format ('csv' | 'xlsx').
@@ -671,30 +820,41 @@ function renderRosterAndHeadcountTab(container, ctx) {
     };
 
     /**
-     * Purpose: Render the YOLO confidence indicator card (GREEN / ORANGE / RED) and
-     *          side-by-side comparison between YOLO Detected Count and Self-Registered Count.
+     * Purpose: Render the YOLO confidence indicator card (GREEN / ORANGE / RED),
+     *          persisted annotated image, and side-by-side count comparison.
      * Inputs:  yolo (object | null) YOLO headcount report.
      * Outputs: void.
      */
     const renderYoloPanel = (yolo) => {
         const regCount = reportData ? reportData.present_count : 0;
-        if (!yolo) {
-            yoloStat.set('—', 'Upload photo or test p3.jpeg');
+        if (!yolo || typeof yolo !== 'object') {
+            resetYoloBtn.disabled = true;
+            yoloStat.set('—', 'Upload a classroom photo');
             statusStat.set('Not run yet', 'Run YOLO headcount below');
             mount(yoloResultHost, el('div', { class: 'empty' },
-                'Upload a classroom photo or click "Test on Classroom Photo (p3.jpeg)" to compare physical headcount against self-registered attendance.'));
+                'Upload a classroom photo above to count physical students and compare against self-registered attendance.'));
             return;
         }
 
+        resetYoloBtn.disabled = false;
+        const detectedCount = Number(yolo.detected_count ?? 0);
+        const avgConfPct = ((Number(yolo.average_confidence) || 0) * 100).toFixed(1);
         const color = yolo.status_color || 'GREEN';
-        const diff = yolo.discrepancy !== null && yolo.discrepancy !== undefined
-            ? (yolo.discrepancy > 0 ? `+${yolo.discrepancy}` : String(yolo.discrepancy))
-            : String(yolo.detected_count - regCount);
+        const effectiveRegistered = yolo.registered_count ?? regCount ?? 0;
+        const diffNum = yolo.discrepancy !== null && yolo.discrepancy !== undefined
+            ? Number(yolo.discrepancy)
+            : (detectedCount - Number(effectiveRegistered));
+        const diff = diffNum > 0 ? `+${diffNum}` : String(diffNum);
 
-        yoloStat.set(String(yolo.detected_count), `Avg conf ${(yolo.average_confidence * 100).toFixed(1)}%`);
+        yoloStat.set(String(detectedCount), `Avg conf ${avgConfPct}%`);
         statusStat.set(color, yolo.status_label || '');
 
-        mount(yoloResultHost, [
+        const hasValidImage = (
+            typeof yolo.annotated_image_data_url === 'string'
+            && yolo.annotated_image_data_url.startsWith('data:image/')
+        );
+
+        const parts = [
             el('div', { class: `yolo-status-card status-${color}` }, [
                 el('div', { class: 'row' }, [
                     el('span', { class: `yolo-badge ${color}` }, `${color} · ${yolo.status_label || 'Confidence Assessment'}`),
@@ -706,12 +866,12 @@ function renderRosterAndHeadcountTab(container, ctx) {
             el('div', { class: 'yolo-compare-grid' }, [
                 el('div', { class: 'card stat' }, [
                     el('div', { class: 'stat-label' }, 'YOLO Detected Count'),
-                    el('div', { class: 'stat-value' }, String(yolo.detected_count)),
+                    el('div', { class: 'stat-value' }, String(detectedCount)),
                     el('div', { class: 'stat-sub' }, 'Physical persons in photo'),
                 ]),
                 el('div', { class: 'card stat' }, [
                     el('div', { class: 'stat-label' }, 'Self-Registered Count'),
-                    el('div', { class: 'stat-value' }, String(yolo.registered_count ?? regCount)),
+                    el('div', { class: 'stat-value' }, String(effectiveRegistered)),
                     el('div', { class: 'stat-sub' }, `Checked in (${activeLessonId})`),
                 ]),
                 el('div', { class: 'card stat' }, [
@@ -720,12 +880,17 @@ function renderRosterAndHeadcountTab(container, ctx) {
                     el('div', { class: 'stat-sub' }, 'Detected minus registered'),
                 ]),
             ]),
-            yolo.annotated_image_data_url
-                ? el('div', { class: 'yolo-photo-frame' }, [
+        ];
+
+        if (hasValidImage) {
+            parts.push(
+                el('div', { class: 'yolo-photo-frame' }, [
                     el('img', { src: yolo.annotated_image_data_url, alt: 'Annotated YOLO classroom headcount with bounding boxes and confidence scores' }),
-                ])
-                : null,
-        ]);
+                ]),
+            );
+        }
+
+        mount(yoloResultHost, parts);
     };
 
     /**
@@ -828,17 +993,24 @@ function renderRosterAndHeadcountTab(container, ctx) {
     const loadLessonReport = async (lessonId) => {
         activeLessonId = lessonId;
         reportData = await api.get(`/api/attendance/sessions/${encodeURIComponent(lessonId)}`);
+        const isLive = Boolean(reportData.session?.active);
+        lessonStatusChip.className = `chip ${isLive ? 'ok live' : ''}`.trim();
+        lessonStatusChip.textContent = isLive ? 'LIVE SESSION' : 'Not active / Closed';
         presentStat.set(String(reportData.present_count), `of ${reportData.total_students} roster students`);
-        absentStat.set(String(reportData.absent_count), reportData.session?.active ? 'Session is LIVE' : 'Session inactive/closed');
+        absentStat.set(String(reportData.absent_count), isLive ? 'Session is LIVE' : 'Session inactive/closed');
 
         updateGroupFilterOptions(reportData.roster_status || []);
         renderTableRows();
 
         const storedYolo = reportData.session?.yolo_headcount || null;
-        if (latestYoloReport && latestYoloReport.lesson_id === lessonId) {
+        if (storedYolo && typeof storedYolo === 'object') {
+            latestYoloReport = storedYolo;
+            renderYoloPanel(storedYolo);
+        } else if (latestYoloReport && latestYoloReport.lesson_id === lessonId && reportData.session === null) {
             renderYoloPanel(latestYoloReport);
         } else {
-            renderYoloPanel(storedYolo);
+            latestYoloReport = null;
+            renderYoloPanel(null);
         }
     };
 
@@ -858,7 +1030,12 @@ function renderRosterAndHeadcountTab(container, ctx) {
             if (live) activeLessonId = live.lesson_id;
             mount(lessonSelect, ids.map((id) => {
                 const match = sessions.find((s) => s.lesson_id === id);
-                const label = match ? `${match.lesson_title} (${id})${match.active ? ' · LIVE' : ''}` : id;
+                const title = match?.lesson_title;
+                const label = match
+                    ? (title && title !== id
+                        ? `${title} (${id})${match.active ? ' · LIVE' : ''}`
+                        : `${id}${match.active ? ' · LIVE' : ''}`)
+                    : id;
                 return el('option', { value: id, selected: id === activeLessonId }, label);
             }));
             await loadLessonReport(activeLessonId);
@@ -867,16 +1044,15 @@ function renderRosterAndHeadcountTab(container, ctx) {
         }
     };
 
-    lessonSelect.addEventListener('change', () => loadLessonReport(lessonSelect.value));
+    lessonSelect.addEventListener('change', () => {
+        latestYoloReport = null;
+        loadLessonReport(lessonSelect.value);
+    });
     searchInput.addEventListener('input', renderTableRows);
     groupSelect.addEventListener('change', renderTableRows);
     statusSelect.addEventListener('change', renderTableRows);
 
-    /* ----- YOLO Classroom Photo Upload & Sample Test Controls ----- */
-    const photoInput = el('input', { type: 'file', accept: '.jpg,.jpeg,.png,.webp', class: 'hidden' });
-    const uploadPhotoBtn = button('Upload classroom photo', { cls: 'primary', iconName: 'camera' });
-    const samplePhotoBtn = button('Test on Classroom Photo (p3.jpeg)', { cls: '', iconName: 'users' });
-
+    /* ----- YOLO Classroom Photo Upload & Reset Controls ----- */
     uploadPhotoBtn.addEventListener('click', () => photoInput.click());
     photoInput.addEventListener('change', () => {
         const file = photoInput.files[0];
@@ -892,14 +1068,37 @@ function renderRosterAndHeadcountTab(container, ctx) {
         photoInput.value = '';
     });
 
-    samplePhotoBtn.addEventListener('click', () => withLoading(samplePhotoBtn, async () => {
-        const url = `/api/attendance/headcount?use_default_asset=true&lesson_id=${encodeURIComponent(activeLessonId)}`;
-        latestYoloReport = await api.post(url);
-        renderYoloPanel(latestYoloReport);
-        toast(`YOLO detected ${latestYoloReport.detected_count} persons on p3.jpeg (${latestYoloReport.status_color}).`, 'success');
+    resetYoloBtn.addEventListener('click', () => withLoading(resetYoloBtn, async () => {
+        await api.delete(`/api/attendance/headcount?lesson_id=${encodeURIComponent(activeLessonId)}`);
+        latestYoloReport = null;
+        toast(`YOLO headcount and photo cleared for ${activeLessonId}.`, 'info');
+        await loadLessonReport(activeLessonId);
     }));
 
+    const syncRosterBtn = button('Sync from Course Excel', { cls: 'sm', iconName: 'refresh' });
+    syncRosterBtn.addEventListener('click', () => withLoading(syncRosterBtn, async () => {
+        const result = await api.post('/api/roster/import?use_default_asset=true');
+        toast(`Synced ${result.total_imported} students from courseid_130158_participants.xlsx.`, 'success');
+        await loadLessonReport(activeLessonId);
+    }));
+
+    const lessonScopeCard = el('div', { class: 'card stack' }, [
+        el('div', { class: 'row' }, [
+            el('div', { class: 'card-title', style: 'margin-bottom:0' }, [
+                el('span', { html: icon('grid') }),
+                el('h2', {}, 'Lesson Scope'),
+            ]),
+            el('span', { class: 'spacer' }),
+            lessonStatusChip,
+        ]),
+        el('div', { class: 'row', style: 'align-items:flex-end' }, [
+            el('label', { class: 'field', style: 'flex:1;min-width:220px' }, ['Selected Lesson Session', lessonSelect]),
+            syncRosterBtn,
+        ]),
+    ]);
+
     mount(container, el('div', { class: 'stack' }, [
+        lessonScopeCard,
         el('div', { class: 'grid grid-stats' }, [presentStat.node, absentStat.node, yoloStat.node, statusStat.node]),
         el('div', { class: 'card stack' }, [
             el('div', { class: 'row' }, [
@@ -909,10 +1108,10 @@ function renderRosterAndHeadcountTab(container, ctx) {
                 ]),
                 el('span', { class: 'spacer' }),
                 uploadPhotoBtn,
-                samplePhotoBtn,
+                resetYoloBtn,
                 photoInput,
             ]),
-            el('p', { class: 'muted' }, 'Runs local Ultralytics YOLO person detection, annotates bounding boxes with confidence scores, and flags discrepancies (GREEN / ORANGE / RED) against self-registered attendance.'),
+            el('p', { class: 'muted' }, 'Upload a classroom photo to count physical students and compare against self-registered attendance.'),
             yoloResultHost,
         ]),
         el('div', { class: 'card stack' }, [
@@ -925,8 +1124,7 @@ function renderRosterAndHeadcountTab(container, ctx) {
                 button('Export CSV (.csv)', { cls: 'sm', iconName: 'download', onclick: () => downloadExport('csv') }),
                 button('Export Excel (.xlsx)', { cls: 'sm primary', iconName: 'download', onclick: () => downloadExport('xlsx') }),
             ]),
-            el('div', { class: 'toolbar-grid' }, [
-                el('label', { class: 'field' }, ['Lesson session', lessonSelect]),
+            el('div', { class: 'toolbar-grid filters-3' }, [
                 el('label', { class: 'field' }, ['Search student', searchInput]),
                 el('label', { class: 'field' }, ['Group filter', groupSelect]),
                 el('label', { class: 'field' }, ['Attendance status', statusSelect]),

@@ -95,13 +95,19 @@ def test_lecturer_registration_and_login_happy_and_edge_cases(
         )
 
     # Edge case 2: Short password rejected with ValueError
-    with pytest.raises(ValueError, match="at least 6 characters"):
+    with pytest.raises(ValueError, match="at least 5 characters"):
         auth.register_lecturer(
             full_name="Dr. Boaz",
             email="boaz@ariel.ac.il",
             password="123",
             access_code="SECRET-LECTURER-2026",
         )
+
+    # Default configured lecturer (adminL@gmail.com / 12345) logs in case-insensitively
+    demo_upper = auth.login_lecturer("adminL@gmail.com", "12345")
+    assert demo_upper["user"]["email"] == "adminl@gmail.com"
+    demo_lower = auth.login_lecturer("adminl@gmail.com", "12345")
+    assert demo_lower["user"]["email"] == "adminl@gmail.com"
 
     # Happy case: Valid lecturer registration
     reg_result = auth.register_lecturer(
@@ -272,9 +278,10 @@ def test_roster_importer_edge_cases_nan_and_invalid_workbooks(
 def test_auth_and_roster_http_endpoints_integration() -> None:
     """
     Purpose:
-        End-to-end HTTP integration test verifying Lecturer registration cookie auth,
-        protected Excel roster upload, student frictionless login, role authorization
-        guards, and roster search endpoints.
+        End-to-end HTTP integration test verifying disabled public lecturer registration
+        (403 Forbidden), case-insensitive default lecturer login (`adminL@gmail.com` / `12345`),
+        automatic startup seeding of the 104-student Hebrew course roster, protected Excel
+        roster upload, student frictionless login, and role authorization guards.
     Inputs:
         None.
     Outputs:
@@ -293,25 +300,46 @@ def test_auth_and_roster_http_endpoints_integration() -> None:
     unauth_res = client.post("/api/roster/import?use_default_asset=true")
     assert unauth_res.status_code == 401
 
-    # 2. Register Lecturer and receive HTTP-only cookie
-    reg_res = client.post(
-        "/api/auth/lecturer/register",
-        json={
-            "full_name": "Prof. Boaz",
-            "email": "boaz@ariel.ac.il",
-            "password": " lecturerPass123 ",
-            "access_code": "TA-ADMIN-2026",
-        },
-    )
-    assert reg_res.status_code == 200
-    assert "ta_lecturer_session" in reg_res.cookies
+    # 2. Public lecturer self-registration endpoints must return 403 Forbidden
+    for reg_path in ("/api/auth/lecturer/register", "/api/auth/register"):
+        reg_res = client.post(
+            reg_path,
+            json={
+                "full_name": "Prof. Boaz",
+                "email": "boaz@ariel.ac.il",
+                "password": "lecturerPass123",
+                "access_code": "TA-ADMIN-2026",
+            },
+        )
+        assert reg_res.status_code == 403
+        assert "disabled" in reg_res.json()["detail"].lower()
 
-    # 3. Verify /api/auth/me recognizes the lecturer cookie
+    # 3. Default Lecturer logs in case-insensitively (adminL@gmail.com and adminl@gmail.com)
+    login_upper = client.post(
+        "/api/auth/lecturer/login",
+        json={"email": "adminL@gmail.com", "password": "12345"},
+    )
+    assert login_upper.status_code == 200
+    assert "ta_lecturer_session" in login_upper.cookies
+
+    login_lower = client.post(
+        "/api/auth/lecturer/login",
+        json={"email": "adminl@gmail.com", "password": "12345"},
+    )
+    assert login_lower.status_code == 200
+    assert login_lower.json()["user"]["role"] == "lecturer"
+
+    # 4. Verify /api/auth/me recognizes the lecturer cookie
     me_res = client.get("/api/auth/me")
     assert me_res.status_code == 200
     assert me_res.json()["user"]["role"] == "lecturer"
 
-    # 4. Upload the real .xlsx file via multipart POST /api/roster/import
+    # 5. Verify the 104-student Hebrew roster was automatically seeded on startup
+    auto_seeded_res = client.get("/api/roster/students")
+    assert auto_seeded_res.status_code == 200
+    assert auto_seeded_res.json()["count"] == 104
+
+    # 6. Upload the real .xlsx file via multipart POST /api/roster/import
     xlsx_bytes = REAL_ROSTER_XLSX.read_bytes()
     import_res = client.post(
         "/api/roster/import",
@@ -328,13 +356,13 @@ def test_auth_and_roster_http_endpoints_integration() -> None:
     assert import_payload["total_imported"] == 104
     assert import_payload["unassigned_group_count"] == 2
 
-    # 5. Query imported students via GET /api/roster/students
+    # 7. Query imported students via GET /api/roster/students
     list_res = client.get("/api/roster/students", params={"q": "avidorliel"})
     assert list_res.status_code == 200
     assert list_res.json()["count"] == 1
     assert list_res.json()["students"][0]["full_name"] == "ליאל אבידור"
 
-    # 6. Student logs in via POST /api/auth/student/login using a fresh client
+    # 8. Student logs in via POST /api/auth/student/login using a fresh client
     stu_client = TestClient(test_app)
     stu_login = stu_client.post(
         "/api/auth/student/login",
@@ -343,6 +371,6 @@ def test_auth_and_roster_http_endpoints_integration() -> None:
     assert stu_login.status_code == 200
     assert stu_login.json()["user"]["full_name"] == "ליאל אבידור"
 
-    # 7. Student attempting lecturer-only roster import must receive 403 Forbidden
+    # 9. Student attempting lecturer-only roster import must receive 403 Forbidden
     forbidden_res = stu_client.post("/api/roster/import?use_default_asset=true")
     assert forbidden_res.status_code == 403

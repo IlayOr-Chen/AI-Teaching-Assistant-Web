@@ -12,6 +12,7 @@ Outputs:
 
 from __future__ import annotations
 
+import re
 import secrets
 import time
 from typing import Any
@@ -61,6 +62,11 @@ class PollService:
 
         counts = [0 for _ in options]
         viewer_vote: int | None = None
+        clean_viewer_id = (
+            re.sub(r"[.$#\[\]/]", "_", viewer_id.strip())
+            if viewer_id and viewer_id.strip()
+            else None
+        )
 
         for voter_key, vote_entry in votes_map.items():
             idx = (
@@ -70,7 +76,7 @@ class PollService:
             )
             if isinstance(idx, int) and 0 <= idx < len(options):
                 counts[idx] += 1
-                if viewer_id and voter_key == viewer_id:
+                if clean_viewer_id and voter_key in {viewer_id, clean_viewer_id}:
                     viewer_vote = idx
 
         total_votes = sum(counts)
@@ -178,17 +184,20 @@ class PollService:
     ) -> dict[str, Any]:
         """
         Purpose:
-            Record a student's vote on an active poll, strictly enforcing one vote
-            per student (`voter_id`) per poll.
+            Record, switch, or cancel a student's vote on an active poll:
+            - First vote by `voter_id`: records `option_index` (`vote_action="cast"`).
+            - Different `option_index` than current choice: switches vote (`vote_action="switched"`).
+            - Same `option_index` as current choice: removes/cancels vote (`vote_action="removed"`).
         Inputs:
             poll_id (str): Target poll identifier.
             voter_id (str): Unique voter identifier (`student_id` or `device_id`).
-            option_index (int): Zero-based index of the chosen option.
+            option_index (int): Zero-based index of the clicked option.
         Outputs:
-            dict[str, Any]: Updated enriched poll dictionary including live percentages.
+            dict[str, Any]: Updated enriched poll dictionary including live percentages and `vote_action`.
         """
-        clean_poll_id = (poll_id or "").strip()
-        clean_voter_id = (voter_id or "").strip()
+        clean_poll_id = re.sub(r"[.$#\[\]/]", "_", (poll_id or "").strip())
+        raw_voter = (voter_id or "").strip()
+        clean_voter_id = re.sub(r"[.$#\[\]/]", "_", raw_voter)
         if not clean_voter_id:
             raise ValueError("A valid student/voter identifier is required to vote.")
 
@@ -204,19 +213,29 @@ class PollService:
             raise ValueError("Selected poll option index is out of range.")
 
         votes_map = raw.get("votes") if isinstance(raw.get("votes"), dict) else {}
-        # Single-vote enforcement: block if voter_id already exists under /polls/{poll_id}/votes
-        if clean_voter_id in votes_map:
-            raise PermissionError("You have already voted in this poll.")
-
-        vote_entry = {
-            "option_index": int(option_index),
-            "voted_at": int(time.time()),
-        }
-        self.repository.set(
-            f"/polls/{clean_poll_id}/votes/{clean_voter_id}", vote_entry
+        existing_entry = votes_map.get(clean_voter_id)
+        existing_idx = (
+            existing_entry.get("option_index")
+            if isinstance(existing_entry, dict)
+            else existing_entry
         )
+
+        vote_path = f"/polls/{clean_poll_id}/votes/{clean_voter_id}"
+        if isinstance(existing_idx, int) and existing_idx == int(option_index):
+            # Student clicked their already-selected option -> cancel/remove their vote
+            self.repository.delete(vote_path)
+            vote_action = "removed"
+        else:
+            vote_entry = {
+                "option_index": int(option_index),
+                "voted_at": int(time.time()),
+            }
+            self.repository.set(vote_path, vote_entry)
+            vote_action = "switched" if isinstance(existing_idx, int) else "cast"
+
         updated_raw = self.repository.get(f"/polls/{clean_poll_id}")
-        return self._format_poll(updated_raw, viewer_id=clean_voter_id)
+        formatted = self._format_poll(updated_raw, viewer_id=clean_voter_id)
+        return {**formatted, "vote_action": vote_action}
 
     def get_poll(
         self, poll_id: str, viewer_id: str | None = None

@@ -63,9 +63,9 @@ export async function renderStudentCheckin(root, { lessonId, qrToken }) {
     try {
         context = await api.get(`/api/attendance/checkin-context?lesson_id=${encodeURIComponent(lessonId)}&qr_token=${encodeURIComponent(qrToken)}`);
     } catch (err) {
-        const expired = /expired/i.test(err.message);
-        mount(host, resultView('err', expired ? 'This QR code has expired' : 'Cannot open check-in', expired
-            ? 'QR codes rotate every few seconds. Scan the code currently shown on the lecturer\'s screen again.'
+        const closed = /closed|not open|inactive/i.test(err.message);
+        mount(host, resultView('err', closed ? 'This attendance session is closed' : 'Cannot open check-in', closed
+            ? 'The lecturer has closed this session or opened a new one. Scan the QR code currently shown on the lecturer\'s screen.'
             : err.message, [button('Back to start', { cls: 'block', onclick: () => { window.location.href = '/'; } })]));
         return;
     }
@@ -99,7 +99,7 @@ export async function renderStudentCheckin(root, { lessonId, qrToken }) {
     };
     requestStudentGps();
 
-    const search = el('input', { type: 'search', placeholder: 'Type your name…', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', 'aria-label': 'Search your name', dir: 'auto' });
+    const search = el('input', { type: 'search', placeholder: 'Type your name or email…', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', 'aria-label': 'Search your name or email', dir: 'auto' });
     const list = el('div', { class: 'combo-list', role: 'listbox' });
     const pickerHost = el('div', { class: 'stack' });
     const submit = button('Check me in', { cls: 'primary lg block', iconName: 'check' });
@@ -108,11 +108,20 @@ export async function renderStudentCheckin(root, { lessonId, qrToken }) {
 
     const renderList = () => {
         const q = search.value.trim();
-        const matches = (q ? students.filter((s) => s.full_name.toLowerCase().includes(q.toLowerCase())) : students).slice(0, 60);
+        const qLower = q.toLowerCase();
+        const matches = (q
+            ? students.filter((s) => (s.full_name || '').toLowerCase().includes(qLower) || (s.email || '').toLowerCase().includes(qLower))
+            : students).slice(0, 60);
         const nodes = matches.map((s) => el('button', {
             class: 'combo-option', type: 'button', role: 'option', onclick: () => choose(s),
-        }, [el('span', { class: 'avatar feed-avatar', html: icon('user') }), el('span', { dir: 'auto' }, highlight(s.full_name, q))]));
-        if (!nodes.length) nodes.push(el('div', { class: 'empty', style: 'border:0' }, 'No matching name. Check the spelling or ask your lecturer.'));
+        }, [
+            el('span', { class: 'avatar feed-avatar', html: icon('user') }),
+            el('div', { class: 'combo-meta' }, [
+                el('span', { class: 'combo-name', dir: 'auto' }, highlight(s.full_name, q)),
+                s.email ? el('span', { class: 'combo-email', dir: 'ltr' }, highlight(s.email, q)) : null,
+            ]),
+        ]));
+        if (!nodes.length) nodes.push(el('div', { class: 'empty', style: 'border:0' }, 'No matching name or email. Check the spelling or ask your lecturer.'));
         else if (!q && students.length > 60) nodes.push(el('div', { class: 'faint center', style: 'padding:0.6rem' }, `Showing 60 of ${students.length} — type to narrow down.`));
         mount(list, nodes);
     };
@@ -133,7 +142,10 @@ export async function renderStudentCheckin(root, { lessonId, qrToken }) {
         inlineError.classList.add('hidden');
         mount(pickerHost, el('div', { class: 'selected-chip' }, [
             el('span', { html: icon('check', 'lg') }),
-            el('strong', { dir: 'auto' }, student.full_name),
+            el('div', { class: 'combo-meta', style: 'flex:1' }, [
+                el('strong', { class: 'combo-name', dir: 'auto' }, student.full_name),
+                student.email ? el('span', { class: 'combo-email', dir: 'ltr' }, student.email) : null,
+            ]),
             button('Change', { cls: 'sm ghost', onclick: () => { search.value = ''; showPicker(); search.focus(); } }),
         ]));
     };
@@ -195,9 +207,9 @@ export async function renderStudentCheckin(root, { lessonId, qrToken }) {
             mount(host, resultView('err', 'Classroom GPS Geofence Check Failed',
                 message,
                 [button('Retry GPS & Check-In', { cls: 'primary block', onclick: () => window.location.reload() })]));
-        } else if (/expired/i.test(message)) {
-            mount(host, resultView('err', 'This QR code has expired',
-                'Scan the code currently shown on the lecturer\'s screen again.'));
+        } else if (/closed|not open|inactive/i.test(message)) {
+            mount(host, resultView('err', 'Attendance session is closed',
+                'This session is no longer accepting check-ins. Ask your lecturer if you need manual attendance.'));
         } else {
             showError(message);
             toast(message, 'error');
@@ -310,9 +322,9 @@ export function renderStudentPortal(root, ctx) {
 function buildStudentTabs(ctx) {
     return [
         { id: 'checkin', label: 'Check-in', icon: 'qr', render: (c) => renderStudentHomeTab(c, ctx) },
-        { id: 'polls', label: 'Live Polls', icon: 'poll', render: (c) => renderPollsTab(c, { ...ctx, role: 'student' }) },
-        { id: 'comments', label: 'Comments & Suggestions', icon: 'message', render: (c) => renderCommentsTab(c, { ...ctx, role: 'student' }) },
-        { id: 'homework', label: 'PDF Homework Review', icon: 'file', render: (c) => renderHomeworkTab(c, { ...ctx, role: 'student' }) },
+        { id: 'polls', label: 'Polls', icon: 'poll', render: (c) => renderPollsTab(c, { ...ctx, role: 'student' }) },
+        { id: 'comments', label: 'Comments', icon: 'message', render: (c) => renderCommentsTab(c, { ...ctx, role: 'student' }) },
+        { id: 'homework', label: 'Homework', icon: 'file', render: (c) => renderHomeworkTab(c, { ...ctx, role: 'student' }) },
     ];
 }
 
@@ -328,17 +340,90 @@ function renderStudentHomeTab(container, ctx) {
         'Pick your name and tap “Check me in”.',
     ].map((text, i) => el('li', { class: 'row' }, [el('span', { class: 'chip ok' }, String(i + 1)), el('span', {}, text)]));
 
-    mount(container, el('div', { class: 'grid grid-2' }, [
-        el('div', { class: 'card stack' }, [
-            el('div', { class: 'card-title' }, [el('span', { html: icon('qr') }), el('h2', {}, 'Check in to class')]),
-            el('ol', { class: 'stack', style: 'list-style:none' }, steps),
-            el('div', { class: 'banner info' }, [el('span', { html: icon('shield') }), el('span', {}, 'One check-in per device every 15 minutes, and you must be on the classroom network.')]),
+    const historySummaryChip = el('span', { class: 'chip' }, 'Loading history…');
+    const historyBar = el('i', { style: 'width:0%' });
+    const historyListHost = el('div', { class: 'stack' }, [
+        el('div', { class: 'empty' }, 'Loading your lesson attendance history…'),
+    ]);
+
+    const loadHistory = async () => {
+        try {
+            const history = await api.get('/api/attendance/my-history');
+            const total = history.total_lessons || 0;
+            const attended = history.attended_count || 0;
+            const rate = history.attendance_rate ?? 0;
+            historyBar.style.width = `${rate}%`;
+            historySummaryChip.className = `chip ${total === 0 ? '' : (rate >= 50 ? 'ok' : 'warn')}`.trim();
+            historySummaryChip.textContent = total === 0
+                ? 'No lessons recorded yet'
+                : `Attended ${attended} / ${total} lesson${total === 1 ? '' : 's'} · ${rate}%`;
+
+            const lessons = history.lessons || [];
+            if (!lessons.length) {
+                mount(historyListHost, el('div', { class: 'empty' },
+                    'No attendance lessons have been opened yet. Your Present / Absent record per lesson will appear here.'));
+                return;
+            }
+
+            mount(historyListHost, el('div', { class: 'history-list' }, lessons.map((item) => {
+                const isPresent = item.status === 'present';
+                const subtitleParts = [];
+                if (isPresent) {
+                    subtitleParts.push(item.method === 'manual' ? 'Marked by lecturer' : 'QR check-in');
+                    if (item.checked_in_at) subtitleParts.push(formatTime(item.checked_in_at));
+                } else {
+                    subtitleParts.push(item.active ? 'Session LIVE now' : 'No check-in recorded');
+                }
+                return el('div', { class: 'history-item' }, [
+                    el('div', { class: 'history-meta' }, [
+                        el('strong', { dir: 'auto' }, item.lesson_title || item.lesson_id),
+                        el('span', { class: 'faint' }, subtitleParts.join(' · ')),
+                    ]),
+                    el('span', { class: `chip ${isPresent ? 'ok' : 'danger'}` }, [
+                        el('span', { class: 'dot' }),
+                        isPresent ? 'Present' : 'Absent',
+                    ]),
+                ]);
+            })));
+        } catch (err) {
+            historySummaryChip.className = 'chip danger';
+            historySummaryChip.textContent = 'Unavailable';
+            mount(historyListHost, el('div', { class: 'empty' }, err.message || 'Could not load attendance history.'));
+        }
+    };
+
+    mount(container, el('div', { class: 'stack' }, [
+        el('div', { class: 'grid grid-2' }, [
+            el('div', { class: 'card stack' }, [
+                el('div', { class: 'card-title' }, [el('span', { html: icon('qr') }), el('h2', {}, 'Check in to class')]),
+                el('ol', { class: 'stack', style: 'list-style:none' }, steps),
+                el('div', { class: 'banner info' }, [el('span', { html: icon('shield') }), el('span', {}, 'One check-in per device every 15 minutes, and you must be inside the classroom GPS geofence.')]),
+            ]),
+            el('div', { class: 'card stack' }, [
+                el('div', { class: 'card-title' }, [el('span', { html: icon('user') }), el('h2', {}, 'Your details')]),
+                el('div', { class: 'stat' }, [
+                    el('div', { class: 'stat-label' }, 'Name'),
+                    el('div', { class: 'stat-value small', style: 'text-align:left' }, [
+                        el('span', { dir: 'auto', style: 'unicode-bidi:plaintext' }, ctx.user.full_name || ''),
+                    ]),
+                ]),
+                el('div', { class: 'stat' }, [el('div', { class: 'stat-label' }, 'Email'), el('div', { class: 'stat-value small', style: 'text-align:left' }, ctx.user.email)]),
+                el('div', { class: 'stat' }, [el('div', { class: 'stat-label' }, 'Group'), el('div', { class: 'stat-value small', style: 'text-align:left' }, ctx.user.group || 'Not assigned')]),
+            ]),
         ]),
         el('div', { class: 'card stack' }, [
-            el('div', { class: 'card-title' }, [el('span', { html: icon('user') }), el('h2', {}, 'Your details')]),
-            el('div', { class: 'stat' }, [el('div', { class: 'stat-label' }, 'Name'), el('div', { class: 'stat-value small', dir: 'auto' }, ctx.user.full_name)]),
-            el('div', { class: 'stat' }, [el('div', { class: 'stat-label' }, 'Email'), el('div', { class: 'stat-value small' }, ctx.user.email)]),
-            el('div', { class: 'stat' }, [el('div', { class: 'stat-label' }, 'Group'), el('div', { class: 'stat-value small' }, ctx.user.group || 'Not assigned')]),
+            el('div', { class: 'row' }, [
+                el('div', { class: 'card-title', style: 'margin-bottom:0' }, [
+                    el('span', { html: icon('clock') }),
+                    el('h2', {}, 'My Attendance History'),
+                ]),
+                el('span', { class: 'spacer' }),
+                historySummaryChip,
+            ]),
+            el('div', { class: 'progress' }, historyBar),
+            historyListHost,
         ]),
     ]));
+
+    loadHistory();
 }

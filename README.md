@@ -1,180 +1,183 @@
 # Web-Based AI Teaching Assistant
 
-> **Ex2: Vibe Coding & Deep Designing — Software Engineering (OOP/OOD)**  
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-Single--Server-009688?logo=fastapi&logoColor=white)
+![Firebase RTDB](https://img.shields.io/badge/Firebase-Realtime%20DB-FFCA28?logo=firebase&logoColor=black)
+![Ultralytics YOLO](https://img.shields.io/badge/YOLO-v8n%20Local-7C8CFF)
+![Google Gemini](https://img.shields.io/badge/Google%20Gemini-BYOK%20Multi--Model-4285F4?logo=google&logoColor=white)
+![Pytest](https://img.shields.io/badge/Pytest-52%2F52%20Passing-34D399?logo=pytest&logoColor=white)
+
+> **Course:** Introduction to Software Engineering (OOP / OOD — **Ex2: Vibe Coding & Deep Designing**), Ariel University  
 > **Team:** Ilay (`IlayOr-Chen`) & Roie (`RoieBenyamin`)
 
 ---
 
 ## 1. Problem Statement
 
-Modern university lectures face four persistent operational and pedagogical bottlenecks during live classroom sessions:
+University lectures suffer from four recurring operational and pedagogical bottlenecks during live classes:
 
-1. **Unreliable & Slow Attendance Tracking:** Manual roll calls waste valuable lecture time, while static QR codes or shared links are easily forwarded to absent friends outside the classroom or used to check in multiple names from a single smartphone ("buddy punching").
-2. **Passive Classroom Feedback:** Students often hesitate to raise questions or critiques publicly during class, and lecturers lack a lightweight, structured channel for lesson-tagged public/private feedback and instant comprehension checks.
-3. **Verbose, Unfocused Lecture Summaries:** Standard automated meeting recaps (such as the raw Zoom AI Companion summary in `/assets/Example_ Class  by zoom).docx`, which spans 28 paragraphs / 695 words with ASR name mistranslations like `"Bez" / "בז" / "בעז"`) lack concise student takeaways and provide zero feedback on lecturer delivery (pacing, clarity, audio quality).
-4. **Isolated Homework Grading Without Peer Context:** Traditional homework feedback evaluates submissions in isolation and leaks early hints if released before the submission deadline closes.
-
----
-
-## 2. Project Scope & Core Features (KISS + Deep OOD)
-
-This platform provides a self-contained, mobile-first **Web-Based AI Teaching Assistant** engineered with a clean 4-tier Object-Oriented Python (**FastAPI**) backend, **Firebase Realtime Database (RTDB)** persistence, local **Ultralytics YOLOv8n** computer vision, and **Google Gemini** multimodal analysis.
-
-### In-Scope Capabilities
-* **Role-Based Authentication & Excel Roster Management (`AuthService` & `RosterImporter`):**
-  * Protected Lecturer registration/login (`LECTURER_ACCESS_CODE` + salted PBKDF2-HMAC-SHA256 `200,000` iterations + signed HTTP-only JWT cookie stored under `/users/lecturers`).
-  * Frictionless Student roster verification against `/students`.
-  * Direct import of the course Excel roster ([courseid_130158_participants.xlsx](file:///c:/Users/ILAYO/Documents/Projects/AI-Teaching-Assistant-Web/assets/courseid_130158_participants.xlsx) — `104` students across Hebrew columns `שם פרטי`, `שם משפחה`, `דוא"ל`, `קבוצות`, gracefully normalizing `3.0` -> `"3"` and handling the `2` empty/NaN group rows for `בועז בן משה` and `נדב סודרי` without crashing), manual Present/Absent overrides, and UTF-8-BOM `.csv` / `.xlsx` exports.
-* **Feature 1 — Smart Multi-Layer Attendance (`AttendanceManager` & `PhotoHeadCounter`):**
-  * **Rotating Animated QR Code:** Cryptographically signed short-lived tokens rotating every **`8` seconds** on the UI with a **`7`-second server-side grace window (`15` seconds total validity)**, animated 60fps SVG countdown ring, and full-screen Projector Mode.
-  * **GPS Geofencing via Browser Geolocation & Haversine Distance (Real-World Pivot from External IP Matching):**
-    * *Why GPS Geofencing:* University Wi-Fi networks use multi-IP NAT / load-balancing pools and many students in class use cellular `4G/5G`, causing false rejections under an External IP check. We replaced IP matching with **Browser Geolocation (`navigator.geolocation`)** and the **Haversine great-circle formula** (`calculate_distance_meters(lat1, lon1, lat2, lon2)`).
-    * *How it works:* Enforces `distance <= geofence_radius_meters` (default `100m`, configurable `30m`–`500m`), includes manual classroom coordinate inputs + Ariel Campus preset, and provides a live **"Enforce GPS Geofencing"** lecturer toggle fallback if a student denies location permission.
-  * **15-Minute Device Cooldown:** Dual enforcement via HMAC-SHA256 signed HTTP-only cookies (`ta_device_id`) and Firebase RTDB (`/device_cooldowns`) blocking a single device from checking in multiple students for 15 minutes (`900s`) with a live `MM:SS` countdown.
-  * **Local YOLOv8n Classroom Headcount:** Runs local `yolov8n.pt` (`imgsz=1280, conf=0.30, classes=[0]`) on uploaded classroom photos (tested on [p3.jpeg](file:///c:/Users/ILAYO/Documents/Projects/AI-Teaching-Assistant-Web/assets/p3.jpeg): **`22` persons detected**, `avg_conf = 0.634`), renders an annotated bounding-box JPEG, displays YOLO Detected Count side-by-side with Self-Registered Count, and computes a **GREEN / ORANGE / RED** confidence & discrepancy status.
-* **Feature 2 — Threaded Comments & Suggestions (`CommentService`):**
-  * Persisted under `/comments` with `Public (Everyone)` vs. `Private (Lecturer Only)` visibility isolation, `With Name` vs. `Anonymous` identity masking, `Lesson 1..N` vs. `General` scope tags, scope filtering, and threaded replies.
-* **Feature 3 — On-the-Spot KISS Polls (`PollService`):**
-  * Persisted under `/polls` with instant multiple-choice creation (`2..8` options), single-vote-per-student enforcement, live open/close controls, and animated live percentage bars.
-* **Feature 4 — ML Lecture Video Summary (`GeminiClient` & `VideoSummarizer`):**
-  * Lecturer Settings panel (`/settings/gemini`) to enter/update a Gemini API Key (masked in UI) and configure the Gemini Model ID (defaulting to `gemini-2.5-flash-lite` while allowing custom IDs such as `gemini-3.5-flash-lite`).
-  * Strict `.mp4`-only validation (`video/mp4`), live processing indicator, and concise structured output (**Executive Summary**, **Key Topics**, **Core Takeaways**, **Action Items**, and **Lecturer Delivery Insights** on `Pacing`, `Clarity`, and `Audio Quality`).
-* **Feature 5 — Deep Homework Review & Peer Comparison (`HomeworkReviewer`):**
-  * Strict `.pdf`-only upload + `pypdf` text extraction (`/homework_assignments`).
-  * **Gated Release Rule:** Students can upload/replace their PDF while submissions are open, but AI reviews and peer comparisons remain strictly locked (`review_released=False`) until the deadline passes OR the Lecturer clicks **"End Submission Now"**.
-  * **Polished Two-Column Review Layout:** (1) **Concise Review & Summary Card** and (2) **Dedicated Peer Comparison Column** across all submitted PDFs — plus the explicit **First-Submission Edge Case** notice when `total_submissions == 1`.
-
-### Out-of-Scope Constraints
-* No integration with Moodle, external Zoom REST APIs, university SSO portals, or facial recognition biometrics.
+1. **Slow & Easily Gamed Attendance Tracking:** Manual roll calls consume valuable lecture time, while unprotected links or static codes without location/device checks are easily forwarded to absent classmates or reused on a single phone ("buddy punching").
+2. **Low-Signal Classroom Feedback:** Students hesitate to speak up publicly during large lectures, and lecturers lack a lightweight, lesson-scoped channel for public/private feedback and instant comprehension checks.
+3. **Verbose, Unfocused Lecture Summaries:** Standard automated meeting recaps (such as Zoom's AI Companion auto-summary, which produces repetitive walls of prose with ASR name hallucinations and zero pedagogical structure) fail to give students concise key concepts/review questions or give lecturers feedback on delivery (pacing, clarity, audio quality).
+4. **Isolated Homework Reviews Without Peer Context:** Conventional homework grading either leaks early feedback before the deadline closes or evaluates each submission in isolation without showing what a student missed compared to class peers.
 
 ---
 
-## 3. Repository Structure & Documentation Links
+## 2. Project Scope & 5 Core Features (KISS + Deep OOD)
+
+This platform is a self-contained, single-server, mobile-first **Web-Based AI Teaching Assistant** engineered with a strict 4-tier Object-Oriented Python (**FastAPI**) backend, **Firebase Realtime Database (RTDB)** persistence, local **Ultralytics YOLOv8n** computer vision, interactive **Leaflet.js + OpenStreetMap** geofencing, and **Google Gemini (BYOK)** multimodal analysis.
+
+### How Each of the 5 Core Features Is Implemented
+
+| # | Feature | Domain Classes | Actual Engineering Implementation & Key Decisions |
+| :-: | :--- | :--- | :--- |
+| **1** | **Smart Multi-Layer Attendance** *(Main Feature)* | `AttendanceManager`, `PhotoHeadCounter`, `RosterImporter`, `AuthService` | • **Multi-Lesson Sessions & Static Session QR:** Generates one short, clean 16-char URL-safe session token per active lesson (valid while `LIVE`, invalidated immediately on close) with a centered QR layout and full-screen **Projector Mode**.<br/>• **Interactive Leaflet.js + OpenStreetMap GPS Geofencing:** Lecturer picks the classroom pin ("Use My Current Location", click/drag, or Ariel preset) and selects **`30m` / `50m` / `100m`** radius pills with a live visual circle; check-ins are verified via the **Haversine great-circle formula** (`calculate_distance_meters`), plus a live **"Enforce GPS Geofencing"** toggle fallback.<br/>• **15-Minute Device Cooldown + One-Click Reset:** Dual enforcement via HMAC-SHA256 signed HTTP-only cookie (`ta_device_id`) and Firebase `/device_cooldowns` (`900s` countdown), plus Lecturer **"Reset 15-Min Device Cooldowns"** (`POST /api/attendance/reset-cooldowns`).<br/>• **Local Ultralytics YOLOv8n Headcount:** Runs local `yolov8n.pt` (`imgsz=1280, conf=0.30, classes=[0]`) on uploaded classroom photos, persists the annotated bounding-box JPEG Data URL per lesson in RTDB (`Reset YOLO` clears count + photo), and displays **GREEN / ORANGE / RED** discrepancy vs. self-registered count.<br/>• **Hebrew Excel Roster, History & Export:** Auto-seeds the 104-student Hebrew roster (`courseid_130158_participants.xlsx` — no student ID# required, safely normalizing `2` empty/NaN group cells), shows Student **My Attendance History**, and exports UTF-8-BOM `.csv` and `.xlsx` sheets. |
+| **2** | **Real-Time / Offline Comments & Suggestions** | `CommentService` | Persisted in Firebase RTDB `/comments` with **Public (Everyone)** vs. **Private (Lecturer Only)** visibility isolation, **With Name** vs. **Anonymous** identity masking (`"Anonymous Student"`), `Lesson 1..N` / `General` scope tagging & filtering, and chronological threaded replies. |
+| **3** | **On-the-Spot KISS Live Polls** | `PollService` | Instant multiple-choice poll creation (`2..8` options) persisted in `/polls`, live open/close controls, animated percentage bars, and **mutable student voting** (cast a vote, click another option to switch, or click the selected option again to cancel/unvote). |
+| **4** | **AI Lecture Video Summarizer** *(YouTube-Only KISS Pipeline)* | `VideoSummarizer`, `GeminiClient` | • **Canonical URL + Real Title:** Accepts public YouTube URLs (`youtube.com/watch?v=...`, `youtu.be/...`, Shorts), strips `&list=`/`&index=` playlist parameters, and fetches the real UTF-8/Hebrew video title via YouTube's public oEmbed API (shown in the card header with a clickable **Watch on YouTube** link at the bottom).<br/>• **Automatic 2-Step Fast Strategy (45–90 Min Lectures):** (1) Fetches the spoken transcript via `youtube-transcript-api` (`he`, `iw`, `en`, including auto-generated captions) and summarizes in seconds with Gemini; (2) if captions are unavailable, falls back automatically to direct YouTube URI analysis with `VideoMetadata(fps=0.1)` (and plain `Part.from_uri` fallback on HTTP 400).<br/>• **Rich Academic Recap:** Generates **Executive Summary (TL;DR)**, **Lecture Overview & Walkthrough** (`detailed_overview`), **Key Concepts & Definitions** (`key_concepts`), **Key Topics**, **Core Learning Takeaways**, **Quick Review Questions** (`study_questions`), **Action Items**, and **Lecturer Delivery Insights** (`Pacing`, `Clarity`, `Audio Quality`), with **Copy** (Markdown) and **Delete** buttons — directly outperforming raw Zoom auto-summaries. |
+| **5** | **Deep LLM Homework Review & Peer Comparison** | `HomeworkReviewer`, `GeminiClient` | • **Multi-Format Files + Public GitHub Repo URLs:** Supports `.pdf`, `.docx`, `.txt`, `.md`, `.zip`, and source code (`.py`, `.java`, `.c`, `.cpp`, `.h`, `.js`, `.ts`, `.html`, `.css`, `.json`) including Hebrew/sparse PDFs, plus public GitHub repositories (`https://github.com/owner/repo` via HTTPS zipball with zero local `git` binary needed).<br/>• **Pure BYOK Architecture:** Students save their own Gemini key & model locally in browser `localStorage` and send them per request via `X-Gemini-Api-Key` / `X-Gemini-Model` headers (never stored on the server; no `.env` `GEMINI_API_KEY` required). Includes inline loading states during submission & review generation.<br/>• **Gated Release Rule & Rich Peer Comparison:** Reviews stay strictly locked (`review_released=False`) until the deadline passes or the Lecturer clicks **"End Submission Now"**. Once unlocked, displays **(1) Concise Review & Summary Card** and **(2) Dedicated Peer Comparison Column** (`Standing vs. Peers` tier + explanation, `Missing or Underdeveloped Compared to Peers`, `Strengths vs. Class Peers`, `Actionable Improvements`, and `Unique Ideas`) — plus the explicit **First-Submission Edge Case** notice when only 1 student submitted.<br/>• **Automatic Gemini Model Fallback:** Automatically retries and falls back across `[selected_model, gemini-3.8-flash, gemini-3.5-flash, gemini-3.5-flash-lite]` on `503`/`429`/`404`, surfacing clear user-facing JSON error details. |
+
+### Out-of-Scope Constraints (Strict KISS Demo Boundaries)
+* No Moodle / university LMS integration, no Zoom REST API integration, no student government/university ID numbers (students authenticate by roster email/name only), and no facial recognition / biometric identification.
+* Restricted Lecturer authentication (`adminL@gmail.com` / `12345`, case-insensitive email, salted PBKDF2-HMAC-SHA256 + signed HTTP-only JWT cookie; public lecturer self-registration disabled with `403 Forbidden`).
+
+---
+
+## 3. Repository Structure & Software Engineering Documentation
 
 ```text
 AI-Teaching-Assistant-Web/
 ├── assets/
-│   ├── courseid_130158_participants.xlsx   # Real 104-student course roster (Hebrew columns, 2 NaN groups)
-│   ├── Example_ Class  by zoom).docx       # Baseline 01:33:52 Zoom auto-summary for benchmark comparison
-│   └── p3.jpeg                             # Real 2000x1500 classroom lecture hall photo for YOLO testing
+│   └── courseid_130158_participants.xlsx   # 104-student Hebrew course roster (2 empty/NaN groups)
 ├── docs/
-│   ├── 01_tools_report.md                  # Technical Tools Report & Empirical Benchmarks
-│   ├── 02_SoW.md                           # Statement of Work (Objectives, Scope, Milestones, AC)
-│   ├── 03_SRS.md                           # Software Requirements Specification & Firebase RTDB Schema
+│   ├── 01_tools_report.md                  # Technical Tools Report, Empirical Benchmarks & Real Pivots
+│   ├── 02_SoW.md                           # Statement of Work (Objectives, Scope, Roles, Milestones, AC)
+│   ├── 03_SRS.md                           # Software Requirements Specification, RTDB Schema & REST API
 │   ├── 04_use_cases.md                     # Main Use Cases & Client Stories (Happy & Edge Cases)
-│   ├── 05_architecture_and_diagrams.md     # Component, Low-Level Class (13 classes), & Sequence Diagrams
-│   ├── 06_testing_strategy.md              # Class-by-Class Testing Strategy & Pytest Verification Report
-│   └── 07_conclusion.md                    # Summary of Results, Limitations & Future Improvements
+│   ├── 05_architecture_and_diagrams.md     # Component, Low-Level Class (13 classes) & Sequence Diagrams
+│   ├── 06_testing_strategy.md              # Class-by-Class Testing Strategy & 52-Test Pytest Report
+│   └── 07_conclusion.md                    # Conclusion, Real-Life Results, Vibe Coding Reflection & Future Work
 ├── src/
-│   ├── config.py                           # AppConfig environment & runtime settings
-│   ├── main.py                             # FastAPI application factory & 28 REST endpoints
+│   ├── config.py                           # AppConfig immutable environment & runtime settings
+│   ├── main.py                             # Single-server FastAPI factory & REST API endpoints
 │   ├── repository/
-│   │   └── firebase_repository.py          # FirebaseRepository + InMemoryFirebaseAdapter
+│   │   └── firebase_repository.py          # FirebaseRepository + thread-safe InMemoryFirebaseAdapter
 │   ├── services/
 │   │   ├── auth_service.py                 # AuthService (PBKDF2-HMAC-SHA256 + JWT cookies)
-│   │   ├── roster_importer.py              # RosterImporter (openpyxl Hebrew/NaN parser)
-│   │   ├── attendance_manager.py           # AttendanceManager (Rotating QR + Haversine GPS + Cooldown)
+│   │   ├── roster_importer.py              # RosterImporter (openpyxl Hebrew/NaN Excel parser)
+│   │   ├── attendance_manager.py           # AttendanceManager (Static QR + Haversine GPS + 15m Cooldown + Exports)
 │   │   ├── photo_head_counter.py           # PhotoHeadCounter (Local YOLOv8n + GREEN/ORANGE/RED logic)
-│   │   ├── poll_service.py                 # PollService (Live polls + single-vote guard)
-│   │   ├── comment_service.py              # CommentService (Public/Private + Anonymous + Threads)
-│   │   ├── gemini_client.py                # GeminiClient (Settings + structured JSON generator)
-│   │   ├── video_summarizer.py             # VideoSummarizer (Strict MP4 + delivery insights)
-│   │   └── homework_reviewer.py            # HomeworkReviewer (Strict PDF + gated peer comparison)
+│   │   ├── poll_service.py                 # PollService (Live polls + mutable vote switching/unvoting)
+│   │   ├── comment_service.py              # CommentService (Public/Private + Anonymous + Threaded replies)
+│   │   ├── gemini_client.py                # GeminiClient (BYOK, fps=0.1 YouTube URI, 503/429/404 model fallback)
+│   │   ├── video_summarizer.py             # VideoSummarizer (YouTube-only, oEmbed titles, 2-step transcript/video)
+│   │   └── homework_reviewer.py            # HomeworkReviewer (Multi-format/GitHub, BYOK, gated rich Peer Comparison)
 │   ├── static/
-│   │   ├── index.html                      # Single-page application shell
+│   │   ├── index.html                      # Mobile-first single-page shell (Leaflet CDN + ES modules)
 │   │   ├── css/styles.css                  # Responsive dark glassmorphic design system
-│   │   └── js/                             # Modular Vanilla ES Modules (app, lecturer, student, etc.)
+│   │   └── js/                             # Modular Vanilla ES Modules (app, lecturer, student, ai_tools, etc.)
 │   └── utils/
-│       └── ip_resolver.py                  # ClientIPResolver (Cloudflare/Render/Local priority)
-├── tests/                                  # 10 pytest modules (44 automated tests, 100% passing)
-├── .env.example                            # Environment configuration template
-├── Procfile                                # Render / PaaS process start command
+│       └── ip_resolver.py                  # ClientIPResolver (Cloudflare/Render/Local header priority)
+├── tests/                                  # 10 pytest modules (52 automated tests, 100% passing)
+├── .env.example                            # Environment configuration template (no Gemini key required!)
+├── Procfile                                # Render / PaaS start command
 ├── render.yaml                             # Render Blueprint deployment spec
-└── requirements.txt                        # Pinned Python dependencies
+└── requirements.txt                        # Python dependencies
 ```
 
-### Software Engineering Documentation Suite
-1. [Technical Tools Report & Real-Life Benchmarks (`docs/01_tools_report.md`)](file:///c:/Users/ILAYO/Documents/Projects/AI-Teaching-Assistant-Web/docs/01_tools_report.md)
-2. [Statement of Work (`docs/02_SoW.md`)](file:///c:/Users/ILAYO/Documents/Projects/AI-Teaching-Assistant-Web/docs/02_SoW.md)
-3. [Software Requirements Specification (`docs/03_SRS.md`)](file:///c:/Users/ILAYO/Documents/Projects/AI-Teaching-Assistant-Web/docs/03_SRS.md)
-4. [Main Use Cases — Happy & Edge Cases (`docs/04_use_cases.md`)](file:///c:/Users/ILAYO/Documents/Projects/AI-Teaching-Assistant-Web/docs/04_use_cases.md)
-5. [Architecture, Low-Level Class Diagram & Sequence Diagrams (`docs/05_architecture_and_diagrams.md`)](file:///c:/Users/ILAYO/Documents/Projects/AI-Teaching-Assistant-Web/docs/05_architecture_and_diagrams.md)
-6. [Testing Strategy & Verification Report (`docs/06_testing_strategy.md`)](file:///c:/Users/ILAYO/Documents/Projects/AI-Teaching-Assistant-Web/docs/06_testing_strategy.md)
-7. [Conclusion, Real-Life Outcomes & Future Work (`docs/07_conclusion.md`)](file:///c:/Users/ILAYO/Documents/Projects/AI-Teaching-Assistant-Web/docs/07_conclusion.md)
+### Direct Links to Every Ex2 Deliverable
+1. [Technical Tools Report & Real-Life Benchmarks (`docs/01_tools_report.md`)](docs/01_tools_report.md) — **To-Do #3**
+2. [Statement of Work (`docs/02_SoW.md`)](docs/02_SoW.md) — **To-Do #4**
+3. [Software Requirements Specification (`docs/03_SRS.md`)](docs/03_SRS.md) — **To-Do #5**
+4. [Main Use Cases — Happy & Edge Cases (`docs/04_use_cases.md`)](docs/04_use_cases.md) — **To-Do #6**
+5. [Architecture, Low-Level Class Diagram & Sequence Diagrams (`docs/05_architecture_and_diagrams.md`)](docs/05_architecture_and_diagrams.md) — **To-Do #7 & #8**
+6. [Testing Strategy Mapped to Classes (`docs/06_testing_strategy.md`)](docs/06_testing_strategy.md) — **To-Do #9**
+7. [Conclusion, Real-Life Outcomes & Reflection (`docs/07_conclusion.md`)](docs/07_conclusion.md) — **To-Do #12**
 
 ---
 
-## 4. Quick-Start Guide (Local `venv` + Cloudflare Tunnel + Render)
+## 4. Quick-Start Guide (Local `venv`, BYOK Setup, Cloudflare Tunnel & Render)
 
 ### 4.1 Local Setup with Python Virtual Environment (`venv`)
 
-1. **Create and activate a local `venv`:**
-   * **Windows (Git Bash):**
+1. **Create and activate a local `venv` (choose your shell):**
+
+   > **Important for Windows Users:** Do **not** run `source venv/Scripts/activate` inside **Windows PowerShell** (`source` is a Bash built-in, not a PowerShell cmdlet). Use `.\venv\Scripts\Activate.ps1` in PowerShell, or use `source venv/Scripts/activate` inside **Git Bash**.
+
+   * **Option A — Windows PowerShell (Default VS Code / Windows Terminal):**
+     ```powershell
+     python -m venv venv
+     # If PowerShell blocks script execution, run this once for the current session:
+     Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+     .\venv\Scripts\Activate.ps1
+     ```
+   * **Option B — Windows Git Bash (`MINGW64`):**
      ```bash
      python -m venv venv
      source venv/Scripts/activate
      ```
-   * **Windows (PowerShell):**
-     ```powershell
-     python -m venv venv
-     .\venv\Scripts\Activate.ps1
-     ```
-   * **macOS / Linux:**
+   * **Option C — macOS / Linux (`bash` / `zsh`):**
      ```bash
      python3 -m venv venv
      source venv/bin/activate
      ```
 
-2. **Install dependencies inside `venv`:**
+2. **Install dependencies inside the activated `venv`:**
    ```bash
    python -m pip install --upgrade pip
    python -m pip install -r requirements.txt
    ```
 
 3. **Configure `.env` and Firebase `serviceAccountKey.json`:**
-   ```bash
-   cp .env.example .env
-   ```
+   * **Windows PowerShell:** `Copy-Item .env.example .env`
+   * **Git Bash / macOS / Linux:** `cp .env.example .env`
    * Target Firebase RTDB URL: `https://ai-teaching-assistant-web-default-rtdb.firebaseio.com/`
-   * Place your Firebase Admin SDK private key file named `serviceAccountKey.json` in the project root directory (matching `FIREBASE_CREDENTIALS_PATH=serviceAccountKey.json` in `.env`).
-   * `.env`, `serviceAccountKey.json`, `venv/`, and `.venv/` are excluded via [.gitignore](file:///c:/Users/ILAYO/Documents/Projects/AI-Teaching-Assistant-Web/.gitignore) and must **never** be committed to Git.
+   * Place `serviceAccountKey.json` in the project root directory (matching `FIREBASE_CREDENTIALS_PATH=serviceAccountKey.json` in `.env`).
+   * **Pure BYOK (No `.env` Gemini Key Needed):** Leave `GEMINI_API_KEY=` blank in `.env`. Lecturers enter (and can clear) their own key directly in the **Video AI** panel, and each Student enters their own key in the **Homework** panel (stored strictly in browser `localStorage`).
+   * `.env`, `serviceAccountKey.json`, and `venv/` are excluded via [.gitignore](.gitignore).
 
-4. **Run the automated `pytest` suite (`./venv`):**
+4. **Run the automated `pytest` suite (`52/52` passing):**
    ```bash
    python -m pytest -v
    ```
 
-5. **Start the FastAPI server (`./venv`):**
+5. **Start the single-server FastAPI app (`http://localhost:8000`):**
    ```bash
-   python -m uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
+   # Recommended for Cloudflare Tunnel & live classroom demo (no mid-request reload drops):
+   python -m uvicorn src.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips="*"
    ```
 
 ### 4.2 Live Classroom Exposure via Cloudflare Tunnel (`cloudflared`)
 
-Because smartphone cameras must reach the server and mobile browsers require an **HTTPS** origin for `navigator.geolocation.getCurrentPosition()` (GPS Geofencing), expose port `8000` with a single command:
+Mobile browsers require **HTTPS** for `navigator.geolocation.getCurrentPosition()` (GPS Geofencing). Expose port `8000` with one command:
 
 ```bash
 cloudflared tunnel --url http://localhost:8000
 ```
 
-* Cloudflare Tunnel outputs a public HTTPS URL such as `https://random-words.trycloudflare.com`.
-* Open that HTTPS URL on the classroom projector computer. FastAPI automatically reads `X-Forwarded-Proto` and `X-Forwarded-Host` (or `PUBLIC_BASE_URL` in `.env`) so the rotating QR code embeds the public HTTPS tunnel URL for students' phones!
+Open the generated `https://<random>.trycloudflare.com` URL on the classroom projector. FastAPI automatically detects `X-Forwarded-Proto` / `X-Forwarded-Host` so the static session QR embeds the live HTTPS tunnel URL.
 
 ### 4.3 Cloud Deployment on Render (`render.yaml` & `Procfile`)
 
-1. Push the repository to GitHub and connect it as a **Blueprint** or **Web Service** on [Render](https://render.com) using [render.yaml](file:///c:/Users/ILAYO/Documents/Projects/AI-Teaching-Assistant-Web/render.yaml) and [Procfile](file:///c:/Users/ILAYO/Documents/Projects/AI-Teaching-Assistant-Web/Procfile).
-2. In the Render Dashboard, upload `serviceAccountKey.json` as a **Secret File** at `/etc/secrets/serviceAccountKey.json` (and set `FIREBASE_CREDENTIALS_PATH=/etc/secrets/serviceAccountKey.json`) and set `GEMINI_API_KEY`.
-3. Render automatically provisions HTTPS and monitors `/api/health`.
+1. Connect the repository on [Render](https://render.com) using [render.yaml](render.yaml) and [Procfile](Procfile).
+2. Add `serviceAccountKey.json` as a Render Secret File at `/etc/secrets/serviceAccountKey.json` and set `FIREBASE_CREDENTIALS_PATH=/etc/secrets/serviceAccountKey.json`.
+3. Render automatically provisions HTTPS and health-checks `GET /api/health`.
 
 ---
 
-## 5. 10-Minute Live Classroom Demo Script
+## 5. 10-Minute Live Classroom Demo Plan (To-Do #11)
 
-| Time | Actor & Screen | Action to Perform | What to Highlight to the Audience |
+| Time | Actor & Screen | Action to Perform | Key Engineering Highlights |
 | :--- | :--- | :--- | :--- |
-| **00:00 – 01:30** | **Lecturer** (Projector) | Open `https://<tunnel-url>/#/lecturer`, register/sign in with `LECTURER_ACCESS_CODE`, and on the **Overview** tab click **"Use bundled course roster"** (or upload `courseid_130158_participants.xlsx`). | **104 students** imported into Firebase RTDB `/students` in `< 20 ms`; the **2 rows with empty `קבוצות`** (`בועז בן משה` & `נדב סודרי`) are normalized cleanly without crashing. |
-| **01:30 – 04:00** | **Lecturer & Students** (Projector + Phones) | Switch to **Live attendance**, click **"Use browser GPS"** (or **"Ariel Campus preset"** `32.1044, 35.2078`), keep radius at `100m`, and click **"Start attendance session"**. Open **Projector mode**. Have students scan the rotating QR on their phones. | **(1)** QR rotates every **8s** with a **7s grace window (15s total)**; **(2)** Student inside `100m` checks in via **Haversine GPS Geofencing**; **(3)** Immediate 2nd check-in on the same phone is blocked by the **15-minute device cooldown (`MM:SS` timer)**; **(4)** Toggle **Enforce GPS Geofencing OFF** live to demonstrate the permission-denied edge-case fallback. |
-| **04:00 – 05:30** | **Lecturer** (Projector) | Open **Roster & YOLO Headcount**, click **"Test on Classroom Photo (p3.jpeg)"**, toggle a student with **Mark Present / Mark Absent**, and click **Export Excel (.xlsx)** / **Export CSV (.csv)**. | Local **YOLOv8n (`imgsz=1280`)** detects **22 physical persons** (`avg_conf = 0.634`), renders annotated bounding boxes, displays the **GREEN / ORANGE / RED** confidence banner against self-registered attendance, and downloads a UTF-8-BOM spreadsheet preserving Hebrew names. |
-| **05:30 – 07:00** | **Lecturer & Students** | In **Live Polls**, launch a multiple-choice poll; students vote on their phones and try voting twice. In **Comments & Suggestions**, a student posts an **Anonymous Public** comment and a **Private (Lecturer-Only)** comment; Lecturer replies. | Animated live poll percentage bars update in real time; duplicate votes are blocked (`403`); private comments are invisible to other students; anonymous identity is masked at the API layer. |
-| **07:00 – 08:30** | **Lecturer** (Projector) | Open **MP4 Lecture Summary**, show the configurable **Gemini API Key & Model ID** (`gemini-2.5-flash-lite` / custom `gemini-3.5-flash-lite`), try selecting a non-MP4 file (`.docx` rejected), then upload an `.mp4` clip. | Strict `.mp4` validation, live processing pulse, and a concise card with **Executive Summary**, **Key Topics**, **Core Takeaways**, **Action Items**, and **Lecturer Delivery Insights** (`Pacing`, `Clarity`, `Audio Quality`) improving on the verbose Zoom summary. |
-| **08:30 – 10:00** | **Lecturer & Students** | Open **PDF Homework Review**, create an assignment, and have 1 student upload a `.pdf` file. Show that the review is **LOCKED (Gated Release)**. Click **"End Submission Now"** as Lecturer, inspect the **First-Submission Edge Case** notice, then have a 2nd student submit on an open assignment and unlock to show the **Peer Comparison Column**. | Proves the **Gated Release Rule** (no leaks while open), the **First-Submission Edge Case** notice when `total_submissions == 1`, and the two-column **Review Card + Peer Comparison Column** when multiple students submit. |
+| **00:00 – 01:30** | **Lecturer** (Projector) | Open `https://<tunnel-url>/#/lecturer`, sign in (`adminL@gmail.com` / `12345`), and view the **Overview** tab (or click **"Sync from Course Excel"**). | **104 Hebrew student records** from `courseid_130158_participants.xlsx` are auto-seeded into Firebase RTDB without ID numbers; the **2 empty/NaN group rows** (`בועז בן משה` & `נדב סודרי`) normalize cleanly with zero crashes. |
+| **01:30 – 04:00** | **Lecturer & Students** (Projector + Phones) | Switch to **Attendance**, place the pin on the **Leaflet.js + OSM Geofence Map**, select **`30m` / `50m` / `100m`**, click **"Start attendance session"**, and open **Projector mode**. Students scan the QR on their phones. | **(1)** Clean static session QR valid while `LIVE` (invalidated on close); **(2)** **Haversine GPS Geofencing** checks phone distance; **(3)** Immediate 2nd check-in on the same phone triggers the **15-minute cooldown (`MM:SS`)**; **(4)** Lecturer clicks **"Reset 15-Min Device Cooldowns"** to unblock instantly; **(5)** Toggle **Enforce GPS Geofencing OFF** live as indoor fallback. |
+| **04:00 – 05:30** | **Lecturer & Students** | In **Roster**, select the lesson, click **"Upload classroom photo"** (view persisted YOLO boxes + **Reset YOLO**), toggle **Mark Present / Absent**, export **CSV/Excel**, and view **My Attendance History** on a student phone. | Local **YOLOv8n (`imgsz=1280`)** counts physical students privately on-device, persists annotated photos per lesson, flags **GREEN / ORANGE / RED** discrepancies, and Student Portal displays per-lesson attendance rate. |
+| **05:30 – 07:00** | **Lecturer & Students** | In **Polls**, launch a live question; students vote, switch options, and unvote. In **Comments**, post an **Anonymous Public** comment and a **Private (Lecturer-Only)** comment; Lecturer replies. | Animated poll bars update immediately on vote/switch/unvote; private comments are isolated from other students; anonymous identities are masked at the API tier. |
+| **07:00 – 08:30** | **Lecturer** (Projector) | Open **Video AI**, enter a Gemini key (`gemini-3.5-flash-lite` or `gemini-3.8-flash`), paste a **public YouTube lecture URL**, click **`Analyze YouTube Video`**, then test **Copy** (Markdown) and **Delete**. | Strips playlist params, fetches real Hebrew/English title via oEmbed, summarizes 45–90 min lectures in seconds via `youtube-transcript-api` (falling back to `fps=0.1` video), displays rich academic sections + clickable YouTube footer link. |
+| **08:30 – 10:00** | **Lecturer & Students** | Open **Homework**, create an assignment, have 2 Students enter their own BYOK key (`localStorage`) and submit a file or **Public GitHub Repo URL** (observing the inline loading card). Show reviews are **LOCKED**, click **"End Submission Now"**, and inspect the two-column **Review Card + Peer Comparison**. | Proves pure BYOK (`X-Gemini-Api-Key`), **Gated Release Rule**, **First-Submission Edge Case**, automatic `503`/`429`/`404` model fallback, and concrete **Standing vs. Peers / Missing vs. Peers / Strengths vs. Peers** insights. |
+
+---
+
+## 6. Conclusion & Results Summary (To-Do #12)
+
+Combining **Deep OOD planning** (4-tier architecture, 13 cohesive OOP classes, deterministic `InMemoryFirebaseAdapter` testing) with **Vibe Coding & real-world classroom testing** produced a reliable, zero-build, single-server platform that passes **52/52 automated `pytest` tests** with **100% diagram-to-code parity**. Real-life testing drove our strongest pivots — replacing External IP checks with Haversine GPS geofencing, replacing rotating QR tokens with clean static session QR + geofence/cooldown protection, and replacing heavy MP4 uploads with our fast YouTube transcript + low-FPS pipeline. See [docs/07_conclusion.md](docs/07_conclusion.md) for the complete analysis and reflection.

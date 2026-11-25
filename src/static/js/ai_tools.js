@@ -1,25 +1,108 @@
 /**
- * Purpose: Frontend UI module for Feature 4 (ML Lecture Video Summary — MP4 Only + Gemini
- *          with Lecturer API key & model settings) and Feature 5 (Deep Homework Review &
- *          Peer Comparison — PDF Only + Gemini + Gated Release Rule + First-Submission notice).
+ * Purpose: Frontend UI module for Feature 4 (AI Lecture Video Summarizer — YouTube URL Only +
+ *          oEmbed title lookup + automatic 2-step transcript / low-FPS strategy) and Feature 5
+ *          (Deep Homework Review & Peer Comparison — Multi-Format Files & Public Git Repo URLs +
+ *          BYOK Gemini + Gated Release Rule + Rich Peer Comparison).
  * Inputs:  DOM container and `{ user, role }` context.
- * Outputs: Interactive Video Summary and Homework Review & Peer Comparison tabs.
+ * Outputs: Interactive Video AI and Homework tabs.
  */
 
 import { api } from './api.js';
 import { icon } from './icons.js';
 import {
-    el, mount, toast, button, withLoading, formatTime,
+    el, mount, toast, button, withLoading, copyText, formatTime,
 } from './ui.js';
 
 const LESSON_TAGS = ['Lesson 1', 'Lesson 2', 'Lesson 3', 'Lesson 4', 'Lesson 5', 'General'];
 
+const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash-lite';
+
+const VALID_GEMINI_MODELS = [
+    'gemini-3.8-flash',
+    'gemini-3.5-flash-lite',
+    'gemini-3.5-flash',
+];
+
+const STUDENT_BYOK_KEY_STORAGE = 'ta_student_gemini_api_key';
+const STUDENT_BYOK_MODEL_STORAGE = 'ta_student_gemini_model';
+
+const HOMEWORK_FILE_ACCEPT = [
+    '.pdf', '.docx', '.txt', '.md', '.zip',
+    '.py', '.java', '.c', '.cpp', '.h',
+    '.js', '.ts', '.html', '.css', '.json',
+].join(',');
+
+/**
+ * Purpose: Format a rich lecture video summary record into clean Markdown for clipboard copying.
+ * Inputs:  s (object) lecture video summary record.
+ * Outputs: string Markdown document.
+ */
+function formatSummaryAsMarkdown(s) {
+    const del = s.delivery_insights || {};
+    const title = s.video_title || s.filename || 'Lecture Video Summary';
+    const sourceUrl = s.source_url || s.youtube_url || '';
+    const lines = [
+        `# ${s.lesson_tag || 'Lecture'} — ${title}`,
+        sourceUrl ? `- **Watch on YouTube:** ${sourceUrl}` : null,
+        `- **Model Used:** ${s.model_used || DEFAULT_GEMINI_MODEL}`,
+        '',
+        '## Executive Summary (TL;DR)',
+        s.executive_summary || '-',
+    ].filter((line) => line !== null);
+
+    if (s.detailed_overview && String(s.detailed_overview).trim()) {
+        lines.push('', '## Lecture Overview & Walkthrough', String(s.detailed_overview).trim());
+    }
+
+    if (Array.isArray(s.key_concepts) && s.key_concepts.length) {
+        lines.push('', '## Key Concepts & Definitions');
+        for (const c of s.key_concepts) {
+            if (c && typeof c === 'object') {
+                lines.push(`- **${c.term || 'Concept'}:** ${c.explanation || ''}`);
+            } else if (c) {
+                lines.push(`- ${c}`);
+            }
+        }
+    }
+
+    if (Array.isArray(s.key_topics) && s.key_topics.length) {
+        lines.push('', '## Key Topics Covered');
+        for (const t of s.key_topics) lines.push(`- ${t}`);
+    }
+
+    if (Array.isArray(s.core_takeaways) && s.core_takeaways.length) {
+        lines.push('', '## Core Learning Takeaways');
+        for (const t of s.core_takeaways) lines.push(`- ${t}`);
+    }
+
+    if (Array.isArray(s.study_questions) && s.study_questions.length) {
+        lines.push('', '## Quick Review Questions');
+        s.study_questions.forEach((q, idx) => lines.push(`${idx + 1}. ${q}`));
+    }
+
+    if (Array.isArray(s.action_items) && s.action_items.length) {
+        lines.push('', '## Action Items & Next Steps');
+        for (const a of s.action_items) lines.push(`- ${a}`);
+    }
+
+    lines.push(
+        '',
+        '## Lecturer Delivery Insights',
+        `- **Overall Rating:** ${del.overall_rating || 'Excellent'}`,
+        `- **Pacing:** ${del.pacing || '-'}`,
+        `- **Clarity:** ${del.clarity || '-'}`,
+        `- **Audio Quality:** ${del.audio_quality || '-'}`,
+    );
+
+    return lines.join('\n');
+}
+
 /* ================================================================== */
-/* Feature 4 — ML Lecture Video Summary (MP4 Only + Gemini Settings)  */
+/* Feature 4 — AI Lecture Video Summarizer (YouTube URL Only)         */
 /* ================================================================== */
 
 /**
- * Purpose: Render the Lecturer's Gemini Settings panel + MP4 Lecture Video Summarizer tab.
+ * Purpose: Render the Lecturer's Gemini Settings panel + YouTube Lecture Video Summarizer tab.
  * Inputs:  container (HTMLElement); ctx { user, role }.
  * Outputs: void.
  */
@@ -27,28 +110,45 @@ export function renderVideoSummaryTab(container, ctx) {
     const settingsStatusChip = el('span', { class: 'chip' }, 'Loading settings…');
     const apiKeyInput = el('input', {
         type: 'password',
-        placeholder: 'Enter or update your Google Gemini API key…',
+        placeholder: 'Enter AI Studio (AIza...) or AQ.... Gemini API key…',
         autocomplete: 'off',
     });
+
     const modelInput = el('input', {
         type: 'text',
-        value: 'gemini-2.5-flash-lite',
-        placeholder: 'e.g. gemini-2.5-flash-lite or gemini-3.5-flash-lite',
-        required: true,
+        value: DEFAULT_GEMINI_MODEL,
+        placeholder: `e.g. ${DEFAULT_GEMINI_MODEL} (or any Gemini model ID)`,
+        'aria-label': 'Gemini Model ID',
     });
+
+    const getSelectedModelId = () => modelInput.value.trim() || DEFAULT_GEMINI_MODEL;
+
+    const setSelectedModelId = (modelId) => {
+        const clean = (modelId || DEFAULT_GEMINI_MODEL).trim();
+        modelInput.value = clean || DEFAULT_GEMINI_MODEL;
+    };
+
+    const applySettingsToChip = (s) => {
+        const modelId = (s && s.model_id) || getSelectedModelId();
+        setSelectedModelId(modelId);
+        const hasKey = Boolean(s && (s.has_api_key || s.has_key));
+        const masked = (s && (s.masked_api_key || s.masked_key)) || '';
+        if (hasKey && masked) {
+            settingsStatusChip.className = 'chip ok';
+            settingsStatusChip.textContent = `Key active (${masked}) · Model: ${modelId}`;
+        } else {
+            settingsStatusChip.className = 'chip warn';
+            settingsStatusChip.textContent = `No API key configured · Model: ${modelId}`;
+        }
+    };
+
     const saveSettingsBtn = button('Save Gemini Settings', { cls: 'primary sm', type: 'submit', iconName: 'sparkles' });
+    const clearSettingsKeyBtn = button('Clear Key', { cls: 'sm ghost danger', type: 'button' });
 
     const loadSettings = async () => {
         try {
             const s = await api.get('/api/settings/gemini');
-            modelInput.value = s.model_id || 'gemini-2.5-flash-lite';
-            if (s.has_api_key) {
-                settingsStatusChip.className = 'chip ok';
-                settingsStatusChip.textContent = `Key active (${s.masked_api_key}) · Model: ${s.model_id}`;
-            } else {
-                settingsStatusChip.className = 'chip warn';
-                settingsStatusChip.textContent = `No external key set (Structured Analyzer active) · Model: ${s.model_id}`;
-            }
+            applySettingsToChip(s);
         } catch (err) {
             toast(err.message, 'error');
         }
@@ -56,19 +156,17 @@ export function renderVideoSummaryTab(container, ctx) {
 
     const settingsForm = el('form', { class: 'stack' }, [
         el('div', { class: 'grid grid-2' }, [
-            el('label', { class: 'field' }, ['Gemini API Key (stored in Firebase RTDB /settings/gemini)', apiKeyInput]),
-            el('label', { class: 'field' }, ['Gemini Model ID (configurable)', modelInput]),
+            el('label', { class: 'field' }, ['Gemini API Key (AIza... or AQ....)', apiKeyInput]),
+            el('label', { class: 'field' }, ['Gemini Model ID (free-text or preset)', modelInput]),
         ]),
         el('div', { class: 'row' }, [
             saveSettingsBtn,
-            button('Preset: gemini-2.5-flash-lite', {
+            clearSettingsKeyBtn,
+            ...VALID_GEMINI_MODELS.map((m) => button(m, {
                 cls: 'sm ghost',
-                onclick: () => { modelInput.value = 'gemini-2.5-flash-lite'; },
-            }),
-            button('Preset: gemini-3.5-flash-lite', {
-                cls: 'sm ghost',
-                onclick: () => { modelInput.value = 'gemini-3.5-flash-lite'; },
-            }),
+                type: 'button',
+                onclick: () => setSelectedModelId(m),
+            })),
             el('span', { class: 'spacer' }),
             settingsStatusChip,
         ]),
@@ -77,50 +175,161 @@ export function renderVideoSummaryTab(container, ctx) {
     settingsForm.addEventListener('submit', (e) => {
         e.preventDefault();
         withLoading(saveSettingsBtn, async () => {
-            const payload = { model_id: modelInput.value.trim() };
+            const payload = { model_id: getSelectedModelId() };
             if (apiKeyInput.value.trim()) payload.api_key = apiKeyInput.value.trim();
-            await api.put('/api/settings/gemini', payload);
+            const updated = await api.put('/api/settings/gemini', payload);
             apiKeyInput.value = '';
+            applySettingsToChip(updated);
             toast(`Gemini settings updated (model: ${payload.model_id}).`, 'success');
-            await loadSettings();
         });
     });
 
-    /* ----- MP4 Upload & Summary List ----- */
+    clearSettingsKeyBtn.addEventListener('click', () => {
+        withLoading(clearSettingsKeyBtn, async () => {
+            apiKeyInput.value = '';
+            const cleared = await api.delete('/api/settings/gemini');
+            applySettingsToChip(cleared);
+            toast('Stored Lecturer Gemini API key cleared.', 'info');
+        });
+    });
+
+    const getLecturerGeminiHeaders = () => {
+        const headers = { 'X-Gemini-Model': getSelectedModelId() };
+        const typedKey = apiKeyInput.value.trim();
+        if (typedKey) headers['X-Gemini-Api-Key'] = typedKey;
+        return headers;
+    };
+
+    /* ----- YouTube URL Summarizer (One Clean Input + One Button) + Summary List ----- */
     const lessonSelect = el('select', {}, LESSON_TAGS.map((t) => el('option', { value: t }, t)));
     const notesInput = el('input', {
         type: 'text',
-        placeholder: 'Optional topic context (e.g. Ex2 KISS OOP & Design Patterns)…',
+        placeholder: 'Optional lecture context notes…',
     });
-    const mp4FileInput = el('input', { type: 'file', accept: '.mp4,video/mp4', class: 'hidden' });
-    const uploadMp4Btn = button('Select & Analyze MP4 Video (.mp4 only)', { cls: 'primary', iconName: 'video' });
+    const youtubeUrlInput = el('input', {
+        type: 'url',
+        placeholder: 'https://www.youtube.com/watch?v=... (Public YouTube Lecture URL)',
+        style: 'min-width:260px;flex:1',
+    });
+
+    const analyzeYoutubeBtn = button('Analyze YouTube Video', { cls: 'primary', iconName: 'sparkles' });
     const processingHost = el('div', { class: 'hidden' });
     const summariesHost = el('div', { class: 'stack' });
 
     const renderSummaryCard = (s) => {
         const del = s.delivery_insights || {};
+        const methodBadge = s.analysis_method === 'youtube_transcript'
+            ? 'YouTube Transcript'
+            : 'YouTube Video';
+        const displayTitle = s.video_title
+            || (s.filename && !String(s.filename).startsWith('http') ? s.filename : `${s.lesson_tag || 'Lecture'} Video Summary`);
+        const sourceUrl = s.source_url
+            || s.youtube_url
+            || (s.filename && String(s.filename).startsWith('http') ? s.filename : '');
+
+        const copyBtn = button('Copy', {
+            cls: 'sm ghost',
+            iconName: 'copy',
+            'aria-label': `Copy summary ${displayTitle}`,
+        });
+        copyBtn.addEventListener('click', async () => {
+            const md = formatSummaryAsMarkdown(s);
+            const ok = await copyText(md);
+            if (ok) toast('Summary copied to clipboard', 'success');
+            else toast('Could not copy summary to clipboard', 'warning');
+        });
+
+        const deleteBtn = button('Delete', {
+            cls: 'sm ghost danger',
+            iconName: 'trash',
+            'aria-label': `Delete summary ${displayTitle}`,
+        });
+        deleteBtn.addEventListener('click', () => {
+            if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+                const ok = window.confirm(`Delete summary for "${displayTitle}"?`);
+                if (!ok) return;
+            }
+            withLoading(deleteBtn, async () => {
+                await api.delete(`/api/video/summaries/${encodeURIComponent(s.summary_id)}`);
+                toast('Lecture video summary deleted.', 'info');
+                await loadSummaries();
+            });
+        });
+
+        const rawOverview = String(s.detailed_overview || '').trim();
+        const overviewParagraphs = rawOverview
+            ? rawOverview.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean)
+            : [];
+        const overviewSection = overviewParagraphs.length
+            ? el('div', { class: 'overview-box' }, [
+                el('div', { class: 'row' }, [
+                    el('span', { html: icon('file') }),
+                    el('h3', {}, 'Lecture Overview & Walkthrough'),
+                ]),
+                ...overviewParagraphs.map((para) => el('p', { class: 'overview-paragraph', dir: 'auto' }, para)),
+            ])
+            : null;
+
+        const keyConcepts = Array.isArray(s.key_concepts) ? s.key_concepts : [];
+        const conceptsSection = keyConcepts.length
+            ? el('div', { class: 'stack', style: 'gap:0.55rem' }, [
+                el('h3', {}, 'Key Concepts & Definitions'),
+                el('div', { class: 'concepts-grid' }, keyConcepts.map((c) => {
+                    const term = (c && typeof c === 'object' ? c.term : 'Concept') || 'Concept';
+                    const explanation = (c && typeof c === 'object' ? c.explanation : String(c || '')) || '';
+                    return el('div', { class: 'concept-card' }, [
+                        el('div', { class: 'concept-term', dir: 'auto' }, term),
+                        el('div', { class: 'concept-explanation', dir: 'auto' }, explanation),
+                    ]);
+                })),
+            ])
+            : null;
+
+        const studyQuestions = Array.isArray(s.study_questions) ? s.study_questions.filter(Boolean) : [];
+
+        const footerSection = sourceUrl
+            ? el('div', { class: 'summary-footer' }, [
+                el('span', { html: icon('video') }),
+                el('span', {}, 'Watch on YouTube:'),
+                el('a', {
+                    class: 'summary-source-link',
+                    href: sourceUrl,
+                    target: '_blank',
+                    rel: 'noopener noreferrer',
+                }, sourceUrl),
+            ])
+            : null;
+
         return el('div', { class: 'card stack' }, [
             el('div', { class: 'row' }, [
                 el('span', { class: 'chip ok' }, s.lesson_tag || 'Lesson 1'),
-                el('strong', {}, s.filename),
-                el('span', { class: 'faint' }, `${s.file_size_kb} KB · Model: ${s.model_used} · ${formatTime(s.created_at)}`),
+                el('strong', { dir: 'auto', style: 'font-size:1.05rem' }, displayTitle),
+                el('span', { class: 'faint' }, `${methodBadge} · Model: ${s.model_used} · ${formatTime(s.created_at)}`),
                 el('span', { class: 'spacer' }),
                 el('span', { class: 'chip ok' }, `Delivery: ${del.overall_rating || 'Excellent'}`),
+                copyBtn,
+                deleteBtn,
             ]),
             el('div', { class: 'banner info' }, [
                 el('span', { html: icon('sparkles') }),
-                el('span', {}, s.executive_summary),
+                el('span', { dir: 'auto' }, s.executive_summary),
             ]),
+            overviewSection,
+            conceptsSection,
             el('div', { class: 'grid grid-2' }, [
                 el('div', { class: 'review-col' }, [
                     el('h3', {}, 'Key Topics Covered'),
-                    el('ul', { class: 'bullet-list' }, (s.key_topics || []).map((t) => el('li', {}, t))),
+                    el('ul', { class: 'bullet-list' }, (s.key_topics || []).map((t) => el('li', { dir: 'auto' }, t))),
                     el('h3', { style: 'margin-top:0.5rem' }, 'Core Learning Takeaways'),
-                    el('ul', { class: 'bullet-list' }, (s.core_takeaways || []).map((t) => el('li', {}, t))),
+                    el('ul', { class: 'bullet-list' }, (s.core_takeaways || []).map((t) => el('li', { dir: 'auto' }, t))),
                 ]),
                 el('div', { class: 'review-col peer-col' }, [
-                    el('h3', {}, 'Action Items & Next Steps'),
-                    el('ul', { class: 'bullet-list' }, (s.action_items || []).map((t) => el('li', {}, t))),
+                    studyQuestions.length ? el('h3', {}, 'Quick Review Questions') : null,
+                    studyQuestions.length
+                        ? el('ul', { class: 'bullet-list' }, studyQuestions.map((q) => el('li', { dir: 'auto' }, q)))
+                        : null,
+                    el('h3', { style: studyQuestions.length ? 'margin-top:0.5rem' : '' }, 'Action Items & Next Steps'),
+                    el('ul', { class: 'bullet-list' }, (s.action_items || []).map((t) => el('li', { dir: 'auto' }, t))),
                     el('h3', { style: 'margin-top:0.5rem' }, 'Lecturer Delivery Insights'),
                     el('div', { class: 'delivery-grid' }, [
                         el('div', { class: 'stat' }, [el('div', { class: 'stat-label' }, 'Pacing'), el('div', { class: 'faint' }, del.pacing || '-')]),
@@ -129,6 +338,7 @@ export function renderVideoSummaryTab(container, ctx) {
                     ]),
                 ]),
             ]),
+            footerSection,
         ]);
     };
 
@@ -137,7 +347,7 @@ export function renderVideoSummaryTab(container, ctx) {
             const { summaries } = await api.get('/api/video/summaries');
             if (!summaries.length) {
                 mount(summariesHost, el('div', { class: 'card empty' },
-                    'No lecture video summaries yet. Upload an MP4 (.mp4) recording above for an instant structured teaching & delivery summary.'));
+                    'No lecture video summaries yet. Paste a public YouTube lecture URL above to generate a structured academic recap with Gemini.'));
                 return;
             }
             mount(summariesHost, summaries.map(renderSummaryCard));
@@ -146,37 +356,35 @@ export function renderVideoSummaryTab(container, ctx) {
         }
     };
 
-    uploadMp4Btn.addEventListener('click', () => mp4FileInput.click());
-    mp4FileInput.addEventListener('change', () => {
-        const file = mp4FileInput.files[0];
-        if (!file) return;
-        if (!file.name.toLowerCase().endsWith('.mp4')) {
-            toast('Unsupported video format. Only MP4 (.mp4) lecture video files are accepted.', 'error');
-            mp4FileInput.value = '';
+    analyzeYoutubeBtn.addEventListener('click', () => {
+        const ytUrl = youtubeUrlInput.value.trim();
+        if (!ytUrl) {
+            toast('Paste a public YouTube video URL (e.g. https://www.youtube.com/watch?v=...).', 'warning');
             return;
         }
-        const form = new FormData();
-        form.append('file', file);
-
+        const activeModel = getSelectedModelId();
         mount(processingHost, el('div', { class: 'processing-pulse' }, [
             el('span', { class: 'spinner' }),
             el('div', { class: 'stack', style: 'gap:0.15rem' }, [
-                el('strong', {}, `Analyzing "${file.name}" via Gemini (${modelInput.value})…`),
-                el('span', { class: 'faint' }, 'Extracting Key Topics, Core Takeaways, Action Items, and Lecturer Delivery Insights (pacing, clarity, audio quality)…'),
+                el('strong', {}, `Analyzing YouTube lecture with Gemini (${activeModel})…`),
+                el('span', { class: 'faint' }, 'Generating executive TL;DR, detailed narrative walkthrough, key concepts, study questions, and lecturer delivery insights…'),
             ]),
         ]));
         processingHost.classList.remove('hidden');
 
-        withLoading(uploadMp4Btn, async () => {
+        withLoading(analyzeYoutubeBtn, async () => {
             try {
-                const url = `/api/video/summarize?lesson_tag=${encodeURIComponent(lessonSelect.value)}&lecturer_notes=${encodeURIComponent(notesInput.value.trim())}`;
-                await api.upload(url, form);
-                toast(`MP4 lecture summary generated for "${file.name}"!`, 'success');
+                await api.post('/api/video/summarize-youtube', {
+                    youtube_url: ytUrl,
+                    lesson_tag: lessonSelect.value,
+                    lecturer_notes: notesInput.value.trim(),
+                }, getLecturerGeminiHeaders());
+                toast('YouTube lecture summary generated!', 'success');
+                youtubeUrlInput.value = '';
                 notesInput.value = '';
                 await loadSummaries();
             } finally {
                 processingHost.classList.add('hidden');
-                mp4FileInput.value = '';
             }
         });
     });
@@ -192,14 +400,17 @@ export function renderVideoSummaryTab(container, ctx) {
         el('div', { class: 'card stack' }, [
             el('div', { class: 'card-title' }, [
                 el('span', { html: icon('video') }),
-                el('h2', {}, 'ML Lecture Video Summarizer (MP4 Only)'),
+                el('h2', {}, 'AI Lecture Video Summarizer'),
             ]),
-            el('p', { class: 'muted' }, 'Upload an MP4 (.mp4) lecture recording to generate a concise, structured teaching summary and delivery analysis — improving directly on verbose raw Zoom auto-summaries.'),
+            el('p', { class: 'muted' }, 'Paste a public YouTube lecture URL to generate an instant structured academic summary with Gemini.'),
             el('div', { class: 'grid', style: 'grid-template-columns:1fr 2fr' }, [
                 el('label', { class: 'field' }, ['Lesson Tag', lessonSelect]),
                 el('label', { class: 'field' }, ['Lecture Focus / Context Notes', notesInput]),
             ]),
-            el('div', { class: 'row' }, [uploadMp4Btn, mp4FileInput]),
+            el('div', { class: 'row' }, [
+                youtubeUrlInput,
+                analyzeYoutubeBtn,
+            ]),
             processingHost,
         ]),
         summariesHost,
@@ -210,7 +421,7 @@ export function renderVideoSummaryTab(container, ctx) {
 }
 
 /* ================================================================== */
-/* Feature 5 — Deep Homework Review & Peer Comparison (PDF Only)      */
+/* Feature 5 — Deep Homework Review (Multi-Format Files + Git Repo)   */
 /* ================================================================== */
 
 /**
@@ -236,26 +447,65 @@ function renderReviewAndComparisonColumns(payload) {
         peerContent = [
             el('div', { class: 'banner info' }, [
                 el('span', { html: icon('info') }),
-                el('span', {}, comp.notice),
+                el('span', {}, comp.notice || 'Peer comparison will populate automatically once additional students submit.'),
             ]),
         ];
     } else {
+        const standing = comp.peer_standing && typeof comp.peer_standing === 'object'
+            ? comp.peer_standing
+            : (typeof comp.peer_standing === 'string' && comp.peer_standing.trim()
+                ? { tier: 'On Par with Peers', explanation: comp.peer_standing.trim() }
+                : null);
+        const standingTier = standing ? (standing.tier || 'On Par with Peers') : '';
+        const standingCls = /above/i.test(standingTier)
+            ? 'ok'
+            : (/needs/i.test(standingTier) ? 'warn' : 'info');
+        const missingList = Array.isArray(comp.missing_compared_to_peers) && comp.missing_compared_to_peers.length
+            ? comp.missing_compared_to_peers
+            : (Array.isArray(comp.common_gaps) ? comp.common_gaps : []);
+        const strengthsList = Array.isArray(comp.strengths_vs_peers) && comp.strengths_vs_peers.length
+            ? comp.strengths_vs_peers
+            : (Array.isArray(comp.relative_strengths) ? comp.relative_strengths : []);
+        const improvementsList = Array.isArray(comp.actionable_improvements) ? comp.actionable_improvements : [];
+        const uniqueList = Array.isArray(comp.unique_ideas) ? comp.unique_ideas : [];
+
         peerContent = [
             el('p', { class: 'faint' }, comp.notice || `Compared against ${comp.peer_count} peer submission(s).`),
-            el('h3', {}, 'Relative Strengths vs. Class Peers'),
-            el('ul', { class: 'bullet-list' }, (comp.relative_strengths || []).map((s) => el('li', {}, s))),
-            el('h3', {}, 'Unique Ideas & Distinctive Angles'),
-            el('ul', { class: 'bullet-list' }, (comp.unique_ideas || []).map((s) => el('li', {}, s))),
-            el('h3', {}, 'Common Cohort Gaps'),
-            el('ul', { class: 'bullet-list' }, (comp.common_gaps || []).map((s) => el('li', {}, s))),
-        ];
+            standing
+                ? el('div', { class: 'overview-box', style: 'padding:0.8rem 1rem' }, [
+                    el('div', { class: 'row' }, [
+                        el('strong', {}, 'Standing vs. Peers:'),
+                        el('span', { class: `chip ${standingCls}` }, standingTier),
+                    ]),
+                    standing.explanation
+                        ? el('p', { class: 'overview-paragraph', style: 'font-size:0.9rem' }, standing.explanation)
+                        : null,
+                ])
+                : null,
+            missingList.length ? el('h3', {}, 'Missing or Underdeveloped Compared to Peers') : null,
+            missingList.length
+                ? el('ul', { class: 'bullet-list' }, missingList.map((s) => el('li', { dir: 'auto' }, s)))
+                : null,
+            strengthsList.length ? el('h3', {}, 'Strengths vs. Class Peers') : null,
+            strengthsList.length
+                ? el('ul', { class: 'bullet-list' }, strengthsList.map((s) => el('li', { dir: 'auto' }, s)))
+                : null,
+            improvementsList.length ? el('h3', {}, 'Actionable Improvements to Close Gaps') : null,
+            improvementsList.length
+                ? el('ul', { class: 'bullet-list' }, improvementsList.map((s) => el('li', { dir: 'auto' }, s)))
+                : null,
+            uniqueList.length ? el('h3', {}, 'Unique Ideas & Distinctive Angles') : null,
+            uniqueList.length
+                ? el('ul', { class: 'bullet-list' }, uniqueList.map((s) => el('li', { dir: 'auto' }, s)))
+                : null,
+        ].filter(Boolean);
     }
 
     return el('div', { class: 'review-columns' }, [
         el('div', { class: 'review-col' }, [
             el('div', { class: 'row' }, [
                 el('span', { class: 'chip ok' }, '1 · Concise Review & Summary Card'),
-                el('span', { class: 'faint' }, `${payload.page_count} page(s) · ${payload.word_count} words`),
+                el('span', { class: 'faint' }, `${payload.filename || 'submission'} · ${payload.word_count} words`),
             ]),
             el('p', {}, rev.brief_summary || ''),
             el('h3', {}, 'Strengths'),
@@ -284,6 +534,151 @@ export function renderHomeworkTab(container, ctx) {
     const isLecturer = ctx.role === 'lecturer';
     const assignmentsHost = el('div', { class: 'stack' });
 
+    const maskByokKey = (raw) => {
+        const clean = (raw || '').trim();
+        if (!clean) return 'Not set';
+        if (clean.length <= 8) return `${clean.slice(0, 2)}...${clean.slice(-2)}`;
+        return `${clean.slice(0, 4)}...${clean.slice(-4)}`;
+    };
+
+    const readStoredStudentKey = () => {
+        try {
+            return (window.localStorage.getItem(STUDENT_BYOK_KEY_STORAGE) || '').trim();
+        } catch (_) {
+            return '';
+        }
+    };
+    const readStoredStudentModel = () => {
+        try {
+            return (window.localStorage.getItem(STUDENT_BYOK_MODEL_STORAGE) || DEFAULT_GEMINI_MODEL).trim() || DEFAULT_GEMINI_MODEL;
+        } catch (_) {
+            return DEFAULT_GEMINI_MODEL;
+        }
+    };
+
+    let studentKeyInput = null;
+    let studentModelInput = null;
+    let studentByokCard = null;
+
+    const getStudentByokHeaders = () => {
+        const keyVal = (studentKeyInput ? studentKeyInput.value : readStoredStudentKey()).trim();
+        const modelVal = (studentModelInput ? studentModelInput.value : readStoredStudentModel()).trim() || DEFAULT_GEMINI_MODEL;
+        if (keyVal) {
+            try {
+                window.localStorage.setItem(STUDENT_BYOK_KEY_STORAGE, keyVal);
+                window.localStorage.setItem(STUDENT_BYOK_MODEL_STORAGE, modelVal);
+            } catch (_) {
+                // Ignore storage quota errors in restricted browsing modes
+            }
+            return {
+                'X-Gemini-Api-Key': keyVal,
+                'X-Gemini-Model': modelVal,
+            };
+        }
+        return { 'X-Gemini-Model': modelVal };
+    };
+
+    if (!isLecturer) {
+        const initialKey = readStoredStudentKey();
+        const initialModel = readStoredStudentModel();
+        studentKeyInput = el('input', {
+            type: 'password',
+            value: initialKey,
+            placeholder: 'Enter your Gemini API Key (AIza... or AQ....)…',
+            autocomplete: 'off',
+        });
+        studentModelInput = el('input', {
+            type: 'text',
+            value: initialModel,
+            placeholder: `e.g. ${DEFAULT_GEMINI_MODEL}`,
+            'aria-label': 'Student Gemini Model ID',
+        });
+        const studentKeyChip = el('span', { class: 'chip' });
+
+        const refreshStudentByokChip = () => {
+            const k = studentKeyInput.value.trim();
+            const m = studentModelInput.value.trim() || DEFAULT_GEMINI_MODEL;
+            if (k) {
+                studentKeyChip.className = 'chip ok';
+                studentKeyChip.textContent = `Browser key ready (${maskByokKey(k)}) · Model: ${m}`;
+            } else {
+                studentKeyChip.className = 'chip warn';
+                studentKeyChip.textContent = `No API key saved · Model: ${m}`;
+            }
+        };
+        refreshStudentByokChip();
+
+        const saveStudentKeyBtn = button('Save Key & Model', { cls: 'primary sm', type: 'submit', iconName: 'sparkles' });
+        const clearStudentKeyBtn = button('Clear Key', { cls: 'sm ghost danger', type: 'button' });
+
+        const persistStudentByok = () => {
+            const k = studentKeyInput.value.trim();
+            const m = studentModelInput.value.trim() || DEFAULT_GEMINI_MODEL;
+            studentModelInput.value = m;
+            try {
+                if (k) {
+                    window.localStorage.setItem(STUDENT_BYOK_KEY_STORAGE, k);
+                } else {
+                    window.localStorage.removeItem(STUDENT_BYOK_KEY_STORAGE);
+                }
+                window.localStorage.setItem(STUDENT_BYOK_MODEL_STORAGE, m);
+            } catch (_) {
+                // Ignore localStorage restrictions
+            }
+            refreshStudentByokChip();
+            return { k, m };
+        };
+
+        const byokForm = el('form', { class: 'stack' }, [
+            el('div', { class: 'grid grid-2' }, [
+                el('label', { class: 'field' }, ['Your Gemini API Key (AIza... or AQ....)', studentKeyInput]),
+                el('label', { class: 'field' }, ['Gemini Model ID (free-text or preset)', studentModelInput]),
+            ]),
+            el('div', { class: 'row' }, [
+                saveStudentKeyBtn,
+                clearStudentKeyBtn,
+                ...VALID_GEMINI_MODELS.map((m) => button(m, {
+                    cls: 'sm ghost',
+                    type: 'button',
+                    onclick: () => {
+                        studentModelInput.value = m;
+                        persistStudentByok();
+                    },
+                })),
+                el('span', { class: 'spacer' }),
+                studentKeyChip,
+            ]),
+        ]);
+
+        byokForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const { k, m } = persistStudentByok();
+            if (!k) {
+                toast('Please enter your Gemini API Key before saving.', 'warning');
+                return;
+            }
+            toast(`Your Gemini key & model (${m}) are saved locally in this browser.`, 'success');
+        });
+
+        clearStudentKeyBtn.addEventListener('click', () => {
+            studentKeyInput.value = '';
+            persistStudentByok();
+            toast('Local Gemini API key cleared from this browser.', 'info');
+        });
+
+        studentKeyInput.addEventListener('input', refreshStudentByokChip);
+        studentModelInput.addEventListener('input', refreshStudentByokChip);
+
+        studentByokCard = el('div', { class: 'card stack' }, [
+            el('div', { class: 'card-title' }, [
+                el('span', { html: icon('sparkles') }),
+                el('h2', {}, 'Your Gemini API Key & Model (BYOK)'),
+            ]),
+            el('p', { class: 'muted' }, 'Stored strictly in your own browser localStorage and sent only with your homework submission headers — never saved on the server.'),
+            byokForm,
+        ]);
+    }
+
     const renderAssignmentCard = (a) => {
         const isReleased = Boolean(a.review_released);
         const deadlineStr = new Date(a.deadline_ts * 1000).toLocaleString();
@@ -306,6 +701,15 @@ export function renderHomeworkTab(container, ctx) {
             const studentPills = (a.submitted_students || []).map((stu) => {
                 const inspectBtn = button(`${stu.student_name} (${stu.filename})`, { cls: 'sm', iconName: 'file' });
                 inspectBtn.addEventListener('click', () => withLoading(inspectBtn, async () => {
+                    if (isReleased) {
+                        mount(detailHost, el('div', { class: 'processing-pulse', role: 'status', 'aria-live': 'polite' }, [
+                            el('span', { class: 'spinner' }),
+                            el('div', { class: 'stack', style: 'gap:0.15rem' }, [
+                                el('strong', {}, `Loading AI Review & Peer Comparison for ${stu.student_name}…`),
+                                el('span', { class: 'faint' }, 'Comparing against class submissions with Gemini…'),
+                            ]),
+                        ]));
+                    }
                     const revData = await api.get(
                         `/api/homework/assignments/${encodeURIComponent(a.assignment_id)}/review?student_id=${encodeURIComponent(stu.student_id)}`,
                     );
@@ -319,65 +723,164 @@ export function renderHomeworkTab(container, ctx) {
                     endNowBtn,
                     el('span', { class: 'faint' }, isReleased
                         ? 'Gate status: UNLOCKED (Students can view AI review & peer comparison)'
-                        : 'Gate status: LOCKED (Students can upload/replace PDF, but reviews are gated until deadline or End Submission Now)'),
+                        : 'Gate status: LOCKED (Students can upload files or submit GitHub repo URLs; reviews remain gated until deadline or End Submission Now)'),
                 ]),
                 studentPills.length
                     ? el('div', { class: 'stack', style: 'gap:0.4rem' }, [
                         el('span', { class: 'faint' }, isReleased
                             ? 'Click a student submission below to inspect their Review Card & Peer Comparison:'
-                            : 'Submitted PDFs (click "End Submission Now" above to release and inspect peer comparisons):'),
+                            : 'Received submissions (click "End Submission Now" above to release and inspect peer comparisons):'),
                         el('div', { class: 'row' }, studentPills),
                     ])
-                    : el('div', { class: 'empty' }, 'No student PDF submissions received yet.'),
+                    : el('div', { class: 'empty' }, 'No student homework submissions received yet.'),
             ]);
         }
 
-        /* ----- Student Controls: Upload PDF (.pdf only) + View Gated/Unlocked Review ----- */
+        /* ----- Student Controls: Multi-Format File Upload OR Public Git Repo URL ----- */
         let studentSection = null;
         if (!isLecturer) {
-            const pdfInput = el('input', { type: 'file', accept: '.pdf,application/pdf', class: 'hidden' });
-            const uploadPdfBtn = button(
-                a.viewer_has_submitted ? 'Replace Submitted PDF (.pdf only)' : 'Upload Homework PDF (.pdf only)',
+            const fileInput = el('input', { type: 'file', accept: HOMEWORK_FILE_ACCEPT, class: 'hidden' });
+            const uploadFileBtn = button(
+                a.viewer_has_submitted
+                    ? 'Replace File (.pdf, .docx, .zip, .txt, .md, code)'
+                    : 'Upload File (.pdf, .docx, .zip, .txt, .md, code)',
                 { cls: 'primary sm', iconName: 'upload' },
             );
-            uploadPdfBtn.disabled = isReleased;
+            uploadFileBtn.disabled = isReleased;
 
-            uploadPdfBtn.addEventListener('click', () => pdfInput.click());
-            pdfInput.addEventListener('change', () => {
-                const file = pdfInput.files[0];
-                if (!file) return;
-                if (!file.name.toLowerCase().endsWith('.pdf')) {
-                    toast('Unsupported homework file format. Only PDF (.pdf) files are accepted.', 'error');
-                    pdfInput.value = '';
-                    return;
+            const repoUrlInput = el('input', {
+                type: 'url',
+                placeholder: 'https://github.com/owner/repo (Public GitHub Repository URL)',
+                style: 'min-width:260px;flex:1',
+            });
+            repoUrlInput.disabled = isReleased;
+            const submitRepoBtn = button('Submit Public Git Repo URL', { cls: 'sm', iconName: 'sparkles' });
+            submitRepoBtn.disabled = isReleased;
+
+            const hwProcessingHost = el('div', { class: 'hidden' });
+
+            const setHwSubmissionBusy = (busy, sourceLabel = '') => {
+                uploadFileBtn.disabled = busy || isReleased;
+                submitRepoBtn.disabled = busy || isReleased;
+                repoUrlInput.disabled = busy || isReleased;
+                if (busy) {
+                    const activeModel = (studentModelInput ? studentModelInput.value : readStoredStudentModel()).trim() || DEFAULT_GEMINI_MODEL;
+                    mount(hwProcessingHost, el('div', { class: 'processing-pulse', role: 'status', 'aria-live': 'polite' }, [
+                        el('span', { class: 'spinner' }),
+                        el('div', { class: 'stack', style: 'gap:0.15rem' }, [
+                            el('strong', {}, 'Submitting & generating AI review with Gemini… This usually takes 5–15 seconds.'),
+                            el('span', { class: 'faint' }, sourceLabel
+                                ? `Analyzing "${sourceLabel}" using ${activeModel} — please keep this tab open until confirmation appears.`
+                                : `Analyzing your submission with ${activeModel}…`),
+                        ]),
+                    ]));
+                    hwProcessingHost.classList.remove('hidden');
+                } else {
+                    hwProcessingHost.classList.add('hidden');
+                    hwProcessingHost.replaceChildren();
                 }
+            };
+
+            const stuIdParam = ctx.user?.student_id || '';
+            const stuNameParam = ctx.user?.full_name || '';
+
+            uploadFileBtn.addEventListener('click', () => fileInput.click());
+            fileInput.addEventListener('change', () => {
+                const file = fileInput.files[0];
+                if (!file) return;
                 const form = new FormData();
                 form.append('file', file);
-                withLoading(uploadPdfBtn, async () => {
-                    await api.upload(`/api/homework/assignments/${encodeURIComponent(a.assignment_id)}/submit`, form);
-                    toast(`PDF "${file.name}" submitted!`, 'success');
-                    await loadAssignments();
+                const queryParts = [];
+                if (stuIdParam) queryParts.push(`student_id=${encodeURIComponent(stuIdParam)}`);
+                if (stuNameParam) queryParts.push(`student_name=${encodeURIComponent(stuNameParam)}`);
+                const qs = queryParts.length ? `?${queryParts.join('&')}` : '';
+                withLoading(uploadFileBtn, async () => {
+                    setHwSubmissionBusy(true, file.name);
+                    try {
+                        await api.upload(
+                            `/api/homework/assignments/${encodeURIComponent(a.assignment_id)}/submit${qs}`,
+                            form,
+                            getStudentByokHeaders(),
+                        );
+                        toast(`Homework file "${file.name}" submitted!`, 'success');
+                        await loadAssignments();
+                    } finally {
+                        setHwSubmissionBusy(false);
+                    }
                 });
-                pdfInput.value = '';
+                fileInput.value = '';
+            });
+
+            submitRepoBtn.addEventListener('click', () => {
+                const urlVal = repoUrlInput.value.trim();
+                if (!urlVal) {
+                    toast('Enter a public GitHub repository URL (e.g. https://github.com/owner/repo).', 'warning');
+                    return;
+                }
+                withLoading(submitRepoBtn, async () => {
+                    setHwSubmissionBusy(true, urlVal);
+                    try {
+                        await api.post(
+                            `/api/homework/assignments/${encodeURIComponent(a.assignment_id)}/submit-repo`,
+                            {
+                                repo_url: urlVal,
+                                student_id: stuIdParam || undefined,
+                                student_name: stuNameParam || undefined,
+                            },
+                            getStudentByokHeaders(),
+                        );
+                        repoUrlInput.value = '';
+                        toast('Public Git repository submitted and analyzed!', 'success');
+                        await loadAssignments();
+                    } finally {
+                        setHwSubmissionBusy(false);
+                    }
+                });
             });
 
             const loadMyReview = async () => {
                 if (!a.viewer_has_submitted) return;
+                if (isReleased) {
+                    mount(detailHost, el('div', { class: 'processing-pulse', role: 'status', 'aria-live': 'polite' }, [
+                        el('span', { class: 'spinner' }),
+                        el('div', { class: 'stack', style: 'gap:0.15rem' }, [
+                            el('strong', {}, 'Loading AI Review & Peer Comparison…'),
+                            el('span', { class: 'faint' }, 'Comparing your submission against class peers with Gemini…'),
+                        ]),
+                    ]));
+                }
                 try {
-                    const revData = await api.get(`/api/homework/assignments/${encodeURIComponent(a.assignment_id)}/review`);
+                    const revQuery = stuIdParam ? `?student_id=${encodeURIComponent(stuIdParam)}` : '';
+                    const revData = await api.get(
+                        `/api/homework/assignments/${encodeURIComponent(a.assignment_id)}/review${revQuery}`,
+                        getStudentByokHeaders(),
+                    );
                     mount(detailHost, renderReviewAndComparisonColumns(revData));
                 } catch (err) {
+                    detailHost.replaceChildren();
                     toast(err.message, 'error');
                 }
             };
             loadMyReview();
 
-            studentSection = el('div', { class: 'row' }, [
-                !isReleased ? uploadPdfBtn : null,
-                pdfInput,
-                a.viewer_has_submitted
-                    ? el('span', { class: 'chip ok' }, [el('span', { html: icon('check') }), 'PDF Submitted'])
-                    : (isReleased ? el('span', { class: 'chip danger' }, 'Submissions Closed') : null),
+            studentSection = el('div', { class: 'stack', style: 'gap:0.65rem' }, [
+                !isReleased
+                    ? el('div', { class: 'row' }, [
+                        uploadFileBtn,
+                        fileInput,
+                        repoUrlInput,
+                        submitRepoBtn,
+                    ])
+                    : null,
+                hwProcessingHost,
+                el('div', { class: 'row' }, [
+                    a.viewer_has_submitted
+                        ? el('span', { class: 'chip ok' }, [el('span', { html: icon('check') }), 'Homework Submitted'])
+                        : (isReleased ? el('span', { class: 'chip danger' }, 'Submissions Closed') : null),
+                    !isReleased
+                        ? el('span', { class: 'faint' }, 'Supported: .pdf, .docx, .zip, .txt, .md, .py, .java, .c, .cpp, .h, .js, .ts, .html, .css, .json, or a Public GitHub URL.')
+                        : null,
+                ]),
             ]);
         }
 
@@ -388,7 +891,7 @@ export function renderHomeworkTab(container, ctx) {
                     isReleased ? 'REVIEWS UNLOCKED' : 'SUBMISSIONS OPEN (REVIEWS GATED)',
                 ]),
                 el('span', { class: 'chip' }, a.lesson_tag || 'Lesson 1'),
-                el('span', { class: 'faint' }, `Deadline: ${deadlineStr} · ${a.submission_count} PDF submission(s)`),
+                el('span', { class: 'faint' }, `Deadline: ${deadlineStr} · ${a.submission_count} submission(s)`),
             ]),
             el('h2', { dir: 'auto' }, a.title),
             a.description ? el('p', { class: 'muted', dir: 'auto' }, a.description) : null,
@@ -404,7 +907,7 @@ export function renderHomeworkTab(container, ctx) {
             if (!assignments.length) {
                 mount(assignmentsHost, el('div', { class: 'card empty' },
                     isLecturer
-                        ? 'No homework assignments created yet. Create a PDF assignment above!'
+                        ? 'No homework assignments created yet. Create an assignment above!'
                         : 'No homework assignments posted yet.'));
                 return;
             }
@@ -419,12 +922,12 @@ export function renderHomeworkTab(container, ctx) {
     if (isLecturer) {
         const titleInput = el('input', {
             type: 'text',
-            placeholder: 'e.g. Ex2: Software Engineering Architecture & Use Cases Report',
+            placeholder: 'e.g. Ex2: Software Engineering Architecture & Repository Submission',
             required: true,
         });
         const descInput = el('input', {
             type: 'text',
-            placeholder: 'Instructions / Grading Focus (e.g. Upload your PDF report covering Happy & Edge Cases)…',
+            placeholder: 'Instructions / Grading Focus (accepts PDF, DOCX, ZIP, code files, or Public GitHub Repo URL)…',
         });
         const tagSelect = el('select', {}, LESSON_TAGS.map((t) => el('option', { value: t }, t)));
         const deadlineHoursInput = el('input', {
@@ -467,13 +970,13 @@ export function renderHomeworkTab(container, ctx) {
         creatorCard = el('div', { class: 'card stack' }, [
             el('div', { class: 'card-title' }, [
                 el('span', { html: icon('file') }),
-                el('h2', {}, 'Create Gated PDF Homework Assignment'),
+                el('h2', {}, 'Create Gated Homework Assignment (Files & Public Git Repo URLs)'),
             ]),
-            el('p', { class: 'muted' }, 'Students upload PDF files only. AI feedback and peer comparisons remain strictly gated until the deadline passes or you click "End Submission Now".'),
+            el('p', { class: 'muted' }, 'Students can upload files (.pdf, .docx, .zip, .txt, .md, source code) or submit a Public GitHub Repository URL. AI feedback and peer comparisons remain strictly gated until the deadline passes or you click "End Submission Now".'),
             form,
         ]);
     }
 
-    mount(container, el('div', { class: 'stack' }, [creatorCard, assignmentsHost]));
+    mount(container, el('div', { class: 'stack' }, [creatorCard, studentByokCard, assignmentsHost]));
     loadAssignments();
 }

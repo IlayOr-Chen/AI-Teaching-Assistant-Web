@@ -55,14 +55,33 @@ def test_poll_service_lifecycle_voting_percentages_and_single_vote_enforcement()
 
     # Student 1 votes for option 0 ("Strategy")
     after_v1 = polls.submit_vote(poll_id, voter_id="stu_alice", option_index=0)
+    assert after_v1["vote_action"] == "cast"
     assert after_v1["total_votes"] == 1
     assert after_v1["viewer_vote"] == 0
     assert after_v1["options"][0]["count"] == 1
     assert after_v1["options"][0]["percentage"] == 100.0
 
-    # Edge case: Student 1 tries to vote a second time -> blocked with PermissionError
-    with pytest.raises(PermissionError, match="already voted"):
-        polls.submit_vote(poll_id, voter_id="stu_alice", option_index=1)
+    # Student 1 clicks a DIFFERENT option (option 2 "Singleton") -> switches their vote
+    switched_v1 = polls.submit_vote(poll_id, voter_id="stu_alice", option_index=2)
+    assert switched_v1["vote_action"] == "switched"
+    assert switched_v1["total_votes"] == 1
+    assert switched_v1["viewer_vote"] == 2
+    assert switched_v1["options"][0]["count"] == 0
+    assert switched_v1["options"][2]["count"] == 1
+    assert switched_v1["options"][2]["percentage"] == 100.0
+
+    # Student 1 clicks the SAME option (option 2) again -> removes/cancels their vote
+    removed_v1 = polls.submit_vote(poll_id, voter_id="stu_alice", option_index=2)
+    assert removed_v1["vote_action"] == "removed"
+    assert removed_v1["total_votes"] == 0
+    assert removed_v1["viewer_vote"] is None
+    assert removed_v1["options"][2]["count"] == 0
+
+    # Student 1 casts vote for option 0 ("Strategy") again
+    recast_v1 = polls.submit_vote(poll_id, voter_id="stu_alice", option_index=0)
+    assert recast_v1["vote_action"] == "cast"
+    assert recast_v1["total_votes"] == 1
+    assert recast_v1["viewer_vote"] == 0
 
     # Edge case: Out-of-range option index -> ValueError
     with pytest.raises(ValueError, match="out of range"):
@@ -237,12 +256,10 @@ def test_polls_and_comments_http_endpoints_and_ui_assets() -> None:
 
     # Authenticate Lecturer, Alice, and Bob
     lec_client.post(
-        "/api/auth/lecturer/register",
+        "/api/auth/lecturer/login",
         json={
-            "full_name": "Prof. Boaz",
-            "email": "boaz@ariel.ac.il",
-            "password": "StrongPassword2026",
-            "access_code": "TA-ADMIN-2026",
+            "email": "adminL@gmail.com",
+            "password": "12345",
         },
     )
     alice_client.post("/api/auth/student/login", json={"email": "alice@ariel.ac.il"})
@@ -269,13 +286,25 @@ def test_polls_and_comments_http_endpoints_and_ui_assets() -> None:
     assert poll_res.status_code == 200
     poll_id = poll_res.json()["poll_id"]
 
-    # 3. Alice votes once -> 200 OK; second vote -> 403 Forbidden
+    # 3. Alice votes for option 1 -> switches to option 0 -> clicks option 0 again to unvote
     v1 = alice_client.post(f"/api/polls/{poll_id}/vote", json={"option_index": 1})
     assert v1.status_code == 200
+    assert v1.json()["vote_action"] == "cast"
+    assert v1.json()["options"][1]["count"] == 1
     assert v1.json()["options"][1]["percentage"] == 100.0
 
-    v1_dup = alice_client.post(f"/api/polls/{poll_id}/vote", json={"option_index": 0})
-    assert v1_dup.status_code == 403
+    v1_switch = alice_client.post(f"/api/polls/{poll_id}/vote", json={"option_index": 0})
+    assert v1_switch.status_code == 200
+    assert v1_switch.json()["vote_action"] == "switched"
+    assert v1_switch.json()["viewer_vote"] == 0
+    assert v1_switch.json()["options"][1]["count"] == 0
+    assert v1_switch.json()["options"][0]["count"] == 1
+
+    v1_unvote = alice_client.post(f"/api/polls/{poll_id}/vote", json={"option_index": 0})
+    assert v1_unvote.status_code == 200
+    assert v1_unvote.json()["vote_action"] == "removed"
+    assert v1_unvote.json()["viewer_vote"] is None
+    assert v1_unvote.json()["total_votes"] == 0
 
     # 4. Alice posts a private comment to the Lecturer
     priv_res = alice_client.post(

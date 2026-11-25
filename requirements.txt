@@ -17,9 +17,10 @@ Pillow>=10.3.0
 openpyxl>=3.1.2
 pypdf>=4.2.0
 
-# AI & Computer Vision (YOLO Headcount & Gemini LLM)
+# AI & Computer Vision (YOLO Headcount, Gemini LLM & YouTube Transcripts)
 ultralytics>=8.2.0
 google-genai>=0.3.0
+youtube-transcript-api>=1.0.0
 
 # Automated Testing
 pytest>=8.2.0

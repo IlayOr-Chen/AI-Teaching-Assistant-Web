@@ -74,19 +74,18 @@ def _make_client(config: AppConfig | None = None) -> tuple[TestClient, FirebaseR
 def _register_lecturer(client: TestClient) -> None:
     """
     Purpose:
-        Register a lecturer so the client carries a lecturer session cookie.
+        Authenticate the configured demo lecturer (`adminL@gmail.com` / `12345`)
+        so the client carries a lecturer session cookie.
     Inputs:
         client (TestClient): Client to authenticate.
     Outputs:
         None.
     """
     res = client.post(
-        "/api/auth/lecturer/register",
+        "/api/auth/lecturer/login",
         json={
-            "full_name": "Prof. Test",
-            "email": "prof@ariel.ac.il",
-            "password": "password123",
-            "access_code": "CODE-1",
+            "email": "adminL@gmail.com",
+            "password": "12345",
         },
     )
     assert res.status_code == 200
@@ -95,8 +94,9 @@ def _register_lecturer(client: TestClient) -> None:
 def test_qr_token_grace_window_keeps_rotated_token_usable_briefly() -> None:
     """
     Purpose:
-        Verify the QR rotates every `rotation_seconds` (~8s) on the UI but stays valid
-        for `rotation_seconds + qr_grace_seconds` (~15s total), then expires.
+        Verify that the static session QR token is a short URL-safe code (16 chars),
+        remains valid for the entire duration that the session is LIVE (`active=True`),
+        and is immediately invalidated when the Lecturer closes the session.
     Inputs:
         None.
     Outputs:
@@ -105,39 +105,31 @@ def test_qr_token_grace_window_keeps_rotated_token_usable_briefly() -> None:
     cfg = AppConfig(
         use_mock_firebase=True,
         jwt_secret=SECRET,
-        qr_rotation_seconds=8,
-        qr_grace_seconds=7,
     )
     repo = FirebaseRepository(use_mock=True)
     mgr = AttendanceManager(repository=repo, config=cfg)
-    mgr.start_session(
+    session = mgr.start_session(
         "lesson_1",
         "Lesson 1",
         classroom_lat=32.1044,
         classroom_lng=35.2078,
     )
 
-    now = int(time.time())
-    fresh = mgr.generate_rotating_qr_token("lesson_1")
-    assert fresh["ttl_seconds"] == 8  # on-screen UI rotation period
-    assert fresh["valid_for_seconds"] == 15  # total server-side acceptance window
-    assert fresh["expires_at"] - fresh["issued_at"] == 15
+    qr_first = mgr.generate_rotating_qr_token("lesson_1")
+    qr_later = mgr.generate_rotating_qr_token("lesson_1")
+    assert qr_first["qr_token"] == qr_later["qr_token"] == session["qr_token"]
+    assert 12 <= len(qr_first["qr_token"]) <= 20
+    assert qr_first["active"] is True
 
-    # Scanned 10s ago (just after the 8s UI rotation) -> still accepted within 15s window
-    scanned_10s_ago = mgr.generate_rotating_qr_token("lesson_1", now_ts=now - 10)
-    assert (
-        mgr.verify_qr_token(scanned_10s_ago["qr_token"], "lesson_1")["lesson_id"]
-        == "lesson_1"
-    )
+    # Valid throughout the active session
+    verified = mgr.verify_qr_token(qr_first["qr_token"], "lesson_1")
+    assert verified["lesson_id"] == "lesson_1"
+    assert verified["active"] is True
 
-    # Issued 20s ago -> beyond 15s (8s rotation + 7s grace) -> rejected
-    stale = mgr.generate_rotating_qr_token("lesson_1", now_ts=now - 20)
-    with pytest.raises(ValueError, match="QR code has expired"):
-        mgr.verify_qr_token(stale["qr_token"], "lesson_1")
-
-    # Token claims really carry the 15s extended exp
-    claims = jwt.decode(fresh["qr_token"], SECRET, algorithms=["HS256"])
-    assert claims["exp"] - claims["iat"] == 15
+    # Invalidated immediately upon closing the session
+    mgr.close_session("lesson_1")
+    with pytest.raises(ValueError, match="closed"):
+        mgr.verify_qr_token(qr_first["qr_token"], "lesson_1")
 
 
 def test_roster_and_attendance_reports_are_lecturer_only() -> None:
@@ -175,8 +167,10 @@ def test_roster_and_attendance_reports_are_lecturer_only() -> None:
 def test_checkin_context_is_qr_gated_and_hides_emails() -> None:
     """
     Purpose:
-        Verify `/api/attendance/checkin-context` only returns names and geofence context
-        for a valid, unexpired token of an open session and never leaks emails or groups.
+        Verify `/api/attendance/checkin-context` is strictly QR-gated (only returns
+        student dropdown options and geofence context for a valid, unexpired token
+        of an open session) and returns `{"student_id", "full_name", "email"}` for
+        each student so Hebrew names and emails render cleanly in the dropdown.
     Inputs:
         None.
     Outputs:
@@ -209,7 +203,7 @@ def test_checkin_context_is_qr_gated_and_hides_emails() -> None:
     assert body["has_classroom_coords"] is True
     assert [s["full_name"] for s in body["students"]] == ["Alice Cohen", "Bob Levi"]
     for student in body["students"]:
-        assert set(student) == {"student_id", "full_name"}
+        assert set(student) == {"student_id", "full_name", "email"}
 
     # Missing/garbage token -> 400, and no names leak
     bad = phone.get(
