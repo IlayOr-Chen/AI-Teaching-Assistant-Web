@@ -51,15 +51,17 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
     Outputs:
         None.
     """
-    # 1. Root HTML shell
+    # 1. Root HTML shell + Leaflet.js CDN
     root_res = ui_client.get("/")
     assert root_res.status_code == 200
     assert "text/html" in root_res.headers.get("content-type", "")
     assert '/static/css/styles.css' in root_res.text
     assert '/static/js/app.js' in root_res.text
     assert 'id="app"' in root_res.text
+    assert 'leaflet@1.9.4/dist/leaflet.css' in root_res.text
+    assert 'leaflet@1.9.4/dist/leaflet.js' in root_res.text
 
-    # 2. Design system stylesheet (animations, QR ring, tabs, toast notifications, mobile-first layout)
+    # 2. Design system stylesheet (animations, QR ring, tabs, toast notifications, mobile-first layout, Leaflet map)
     css_res = ui_client.get("/static/css/styles.css")
     assert css_res.status_code == 200
     assert "text/css" in css_res.headers.get("content-type", "")
@@ -72,17 +74,84 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
         ".toast",
         ".checkin-shell",
         ".projector-overlay",
+        ".geofence-map-container",
+        ".radius-pills",
+        ".radius-pill",
+        ".combo-email",
+        'input[type="url"]',
     ):
         assert expected_selector in css_res.text, f"Missing CSS rule: {expected_selector}"
 
     # 3. ES module JavaScript files
     js_files = {
         "/static/js/app.js": ["renderLecturerDashboard", "renderStudentPortal", "renderStudentCheckin"],
-        "/static/js/lecturer.js": ["renderLecturerAuth", "renderLecturerDashboard", "buildQrDisplay"],
-        "/static/js/student.js": ["renderStudentCheckin", "renderStudentLogin", "renderStudentPortal"],
+        "/static/js/lecturer.js": [
+            "renderLecturerAuth",
+            "renderLecturerDashboard",
+            "buildQrDisplay",
+            "Enter your email",
+            "label: 'Overview'",
+            "label: 'Attendance'",
+            "label: 'Roster'",
+            "label: 'Polls'",
+            "label: 'Comments'",
+            "label: 'Video AI'",
+            "label: 'Homework'",
+            "Select Existing Lesson or Open a New Lesson",
+            "Switch / Open Another Lesson",
+            "Lesson Scope",
+            "Upload classroom photo",
+            "Reset YOLO",
+            "Sync from Course Excel",
+            "Reset 15-Min Device Cooldowns",
+            "Use My Current Location",
+            "RADIUS_OPTIONS = [30, 50, 100]",
+            "default_geofence_radius_meters",
+            "invalidateSize()",
+            "Copy Link",
+            "Scan to check in — protected by GPS Geofencing & 15-min device cooldown.",
+        ],
+        "/static/js/student.js": [
+            "renderStudentCheckin",
+            "renderStudentLogin",
+            "renderStudentPortal",
+            "combo-email",
+            "My Attendance History",
+            "/api/attendance/my-history",
+            "inside the classroom GPS geofence",
+        ],
+        "/static/js/polls_comments.js": ["Selected — click again to unvote"],
+        "/static/js/ai_tools.js": [
+            "gemini-3.8-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.5-flash",
+            "Clear Key",
+            "No API key configured",
+            "No API key saved",
+            "AI Lecture Video Summarizer",
+            "Analyze YouTube Video",
+            "Watch on YouTube:",
+            "summary-footer",
+            "Submitting & generating AI review with Gemini",
+            "Standing vs. Peers:",
+            "Missing or Underdeveloped Compared to Peers",
+            "Strengths vs. Class Peers",
+            "Actionable Improvements to Close Gaps",
+            "Lecture Overview & Walkthrough",
+            "Key Concepts & Definitions",
+            "Quick Review Questions",
+            "Summary copied to clipboard",
+            "ta_student_gemini_api_key",
+            "ta_student_gemini_model",
+            "X-Gemini-Api-Key",
+            "X-Gemini-Model",
+            "Your Gemini API Key & Model (BYOK)",
+            "/api/video/summarize-youtube",
+            "/api/video/summaries/",
+        ],
         "/static/js/ui.js": ["toast", "createTabs", "pageShell", "withLoading"],
-        "/static/js/api.js": ["ApiError", "export const api"],
-        "/static/js/icons.js": ["export function icon"],
+        "/static/js/api.js": ["ApiError", "export const api", "extraHeaders", "Gateway/Server error", "text/html", "delete:"],
+        "/static/js/icons.js": ["export function icon", "trash:", "refresh:"],
     }
     for path, expected_tokens in js_files.items():
         res = ui_client.get(path)
@@ -91,3 +160,22 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
         assert "javascript" in content_type, f"Unexpected content-type for {path}: {content_type}"
         for token in expected_tokens:
             assert token in res.text, f"Expected '{token}' in {path}"
+    # Confirm free-text Gemini model ID replaced rigid __custom__ dropdown, MP4 upload UI & mode pills were removed
+    ai_js = ui_client.get("/static/js/ai_tools.js").text
+    assert "__custom__" not in ai_js
+    assert "modelSelect" not in ai_js
+    assert "Upload MP4 File" not in ai_js
+    assert "/api/video/summarize?" not in ai_js
+    assert "gemini-2.5-flash" not in ai_js
+    assert "Fast (Transcript)" not in ai_js
+    assert "Audio Only" not in ai_js
+    assert "Full Video (Low FPS)" not in ai_js
+    # Confirm public lecturer self-registration UI, email placeholder leak, and demo media assets were removed
+    lec_js = ui_client.get("/static/js/lecturer.js").text
+    assert "Create lecturer account" not in lec_js
+    assert "/api/auth/lecturer/register" not in lec_js
+    assert "adminL@gmail.com" not in lec_js
+    assert "QR rotates every" not in lec_js
+    assert "p3.jpeg" not in lec_js
+    stu_js = ui_client.get("/static/js/student.js").text
+    assert "on the classroom network" not in stu_js

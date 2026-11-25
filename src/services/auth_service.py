@@ -229,8 +229,8 @@ class AuthService:
             raise ValueError("Lecturer full name is required.")
         if not clean_email or "@" not in clean_email:
             raise ValueError("A valid lecturer email address is required.")
-        if not password or len(password) < 6:
-            raise ValueError("Lecturer password must be at least 6 characters long.")
+        if not password or len(password) < 5:
+            raise ValueError("Lecturer password must be at least 5 characters long.")
 
         lecturer_id = self.email_to_key(clean_email)
         rtdb_path = f"/users/lecturers/{lecturer_id}"
@@ -258,23 +258,70 @@ class AuthService:
         public_profile = {k: v for k, v in record.items() if k != "password_hash"}
         return {"user": public_profile, "token": token}
 
+    def seed_default_lecturer(self) -> dict[str, Any]:
+        """
+        Purpose:
+            Ensure the configured default lecturer account (`config.lecturer_email`,
+            e.g., `adminL@gmail.com` with password `12345`) is seeded into Firebase RTDB
+            under `/users/lecturers/{lecturer_id}` on startup.
+        Inputs:
+            None.
+        Outputs:
+            dict[str, Any]: Public lecturer profile dictionary stored in Firebase RTDB.
+        """
+        clean_email = (self.config.lecturer_email or "adminL@gmail.com").strip().lower()
+        clean_name = (self.config.lecturer_name or "Course Lecturer").strip()
+        raw_pass = self.config.lecturer_password or "12345"
+
+        lecturer_id = self.email_to_key(clean_email)
+        rtdb_path = f"/users/lecturers/{lecturer_id}"
+        existing = self.repository.get(rtdb_path)
+
+        if isinstance(existing, dict) and self.verify_password(
+            raw_pass, str(existing.get("password_hash", ""))
+        ):
+            return {k: v for k, v in existing.items() if k != "password_hash"}
+
+        record = {
+            "lecturer_id": lecturer_id,
+            "full_name": clean_name,
+            "email": clean_email,
+            "password_hash": self.hash_password(raw_pass),
+            "role": "lecturer",
+            "created_at": (
+                int(existing["created_at"])
+                if isinstance(existing, dict) and "created_at" in existing
+                else int(time.time())
+            ),
+        }
+        self.repository.set(rtdb_path, record)
+        return {k: v for k, v in record.items() if k != "password_hash"}
+
     def login_lecturer(self, email: str, password: str) -> dict[str, Any]:
         """
         Purpose:
             Authenticate an existing Lecturer against `/users/lecturers` in Firebase RTDB
+            using case-insensitive email matching (`adminL@gmail.com` == `adminl@gmail.com`)
             and issue a signed JWT session token.
         Inputs:
-            email (str): Lecturer's registered email address.
+            email (str): Lecturer's email address (matched case-insensitively).
             password (str): Lecturer's plaintext password.
         Outputs:
             dict[str, Any]: Dictionary containing `user` profile and signed `token`.
         """
-        clean_email = email.strip().lower()
+        clean_email = (email or "").strip().lower()
         if not clean_email or not password:
             raise ValueError("Email and password are required.")
 
         lecturer_id = self.email_to_key(clean_email)
         record = self.repository.get(f"/users/lecturers/{lecturer_id}")
+
+        # Auto-seed the configured default lecturer account if it has not been seeded yet
+        configured_email = (self.config.lecturer_email or "").strip().lower()
+        if not isinstance(record, dict) and clean_email == configured_email:
+            self.seed_default_lecturer()
+            record = self.repository.get(f"/users/lecturers/{lecturer_id}")
+
         if not isinstance(record, dict) or not self.verify_password(
             password, str(record.get("password_hash", ""))
         ):

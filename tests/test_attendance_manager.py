@@ -56,8 +56,6 @@ def attendance_env() -> tuple[AppConfig, FirebaseRepository, AttendanceManager]:
     config = AppConfig(
         use_mock_firebase=True,
         jwt_secret="checkpoint-3-5-attendance-geofence-secret-key-32-bytes",
-        qr_rotation_seconds=8,
-        qr_grace_seconds=7,
         device_cooldown_minutes=15,
         enforce_geofence_default=True,
         geofence_radius_meters=100,
@@ -126,17 +124,17 @@ def test_rotating_qr_token_generation_and_expiration(
 ) -> None:
     """
     Purpose:
-        Verify that `generate_rotating_qr_token` produces unique, short-lived,
-        cryptographically signed tokens (~8s UI rotation + ~7s grace = 15s total validity)
-        and Base64 PNG QR images, and that `verify_qr_token` rejects expired, tampered,
-        or wrong-lesson tokens.
+        Verify that starting a session generates ONE short static session QR token
+        (16 URL-safe characters) valid for the entire duration that the session
+        remains LIVE (`active=True`), and that `verify_qr_token` rejects tokens once
+        the session is closed, or when presented with a wrong-lesson or forged token.
     Inputs:
         attendance_env: Isolated attendance test fixture.
     Outputs:
         None.
     """
-    config, _, manager = attendance_env
-    manager.start_session(
+    _, _, manager = attendance_env
+    session = manager.start_session(
         lesson_id="lesson_1",
         lesson_title="Lesson 1: OOD Principles",
         classroom_lat=CLASSROOM_LAT,
@@ -146,37 +144,30 @@ def test_rotating_qr_token_generation_and_expiration(
     qr1 = manager.generate_rotating_qr_token("lesson_1", base_url="https://ta.example.com")
     qr2 = manager.generate_rotating_qr_token("lesson_1", base_url="https://ta.example.com")
 
-    assert qr1["qr_token"] != qr2["qr_token"]
-    assert qr1["ttl_seconds"] == 8
-    assert qr1["valid_for_seconds"] == 15
+    # Static session QR: same short URL-safe token returned throughout the active session
+    assert qr1["qr_token"] == qr2["qr_token"] == session["qr_token"]
+    assert 12 <= len(qr1["qr_token"]) <= 20
+    assert qr1["active"] is True
     assert qr1["qr_image_data_url"].startswith("data:image/png;base64,")
-    assert "lesson_id=lesson_1" in qr1["checkin_url"]
+    assert f"lesson_id=lesson_1&qr_token={qr1['qr_token']}" in qr1["checkin_url"]
 
     claims = manager.verify_qr_token(qr1["qr_token"], expected_lesson_id="lesson_1")
     assert claims["lesson_id"] == "lesson_1"
     assert claims["type"] == "qr_attendance"
+    assert claims["active"] is True
 
     # Edge case 1: Token used for a different lesson session is rejected
     with pytest.raises(ValueError, match="different lesson session"):
         manager.verify_qr_token(qr1["qr_token"], expected_lesson_id="lesson_2")
 
-    # Edge case 2: Expired rotating QR token is rejected
-    expired_qr = manager.generate_rotating_qr_token(
-        "lesson_1", ttl_override_seconds=-5
-    )
-    with pytest.raises(ValueError, match="QR code has expired"):
-        manager.verify_qr_token(expired_qr["qr_token"], expected_lesson_id="lesson_1")
+    # Edge case 2: Forged or random token is rejected
+    with pytest.raises(ValueError, match="Invalid or inactive session QR attendance token"):
+        manager.verify_qr_token("forged_wrong_token", expected_lesson_id="lesson_1")
 
-    # Edge case 3: Non-QR JWT token is rejected
-    auth_svc = AuthService(repository=manager.repository, config=config)
-    regular_user_jwt = auth_svc.create_jwt_token(
-        subject_id="stu_alice",
-        role="student",
-        email="alice@ariel.ac.il",
-        full_name="Alice Cohen",
-    )
-    with pytest.raises(ValueError, match="Invalid token type"):
-        manager.verify_qr_token(regular_user_jwt, expected_lesson_id="lesson_1")
+    # Edge case 3: Once the Lecturer closes the session, the static session token is invalidated
+    manager.close_session("lesson_1")
+    with pytest.raises(ValueError, match="closed"):
+        manager.verify_qr_token(qr1["qr_token"], expected_lesson_id="lesson_1")
 
 
 def test_signed_device_cookie_creation_and_tamper_detection(
@@ -404,7 +395,7 @@ def test_attendance_http_endpoints_gps_geofence_and_cooldown_flow() -> None:
     cfg = AppConfig(
         use_mock_firebase=True,
         jwt_secret="http-integration-attendance-secret-key-32-bytes",
-        lecturer_access_code="TA-ADMIN-2026",
+        geofence_radius_meters=50,
     )
     repo = FirebaseRepository(use_mock=True)
     repo.set(
@@ -427,16 +418,19 @@ def test_attendance_http_endpoints_gps_geofence_and_cooldown_flow() -> None:
     test_app = create_app(config=cfg, repository=repo)
     lec_client = TestClient(test_app)
 
-    # 1. Lecturer registers and opens Lesson 1 with classroom GPS coordinates and 100m radius
+    # 1. Lecturer logs in with configured account and verifies default_geofence_radius_meters from AppConfig
     lec_client.post(
-        "/api/auth/lecturer/register",
+        "/api/auth/lecturer/login",
         json={
-            "full_name": "Prof. Boaz",
-            "email": "boaz@ariel.ac.il",
-            "password": "StrongPassword123",
-            "access_code": "TA-ADMIN-2026",
+            "email": "adminL@gmail.com",
+            "password": "12345",
         },
     )
+    sessions_list = lec_client.get("/api/attendance/sessions")
+    assert sessions_list.status_code == 200
+    assert sessions_list.json()["default_geofence_radius_meters"] == 50
+    assert sessions_list.json()["default_enforce_geofence"] is True
+
     start_res = lec_client.post(
         "/api/attendance/sessions",
         json={
@@ -533,3 +527,318 @@ def test_attendance_http_endpoints_gps_geofence_and_cooldown_flow() -> None:
     assert bypass_success.status_code == 200
     assert bypass_success.json()["record"]["student_id"] == "stu_2"
     assert bypass_success.json()["record"]["geofence_status"] == "bypassed"
+
+
+def test_reset_device_cooldowns_immediately_unblocks_cookie_holder() -> None:
+    """
+    Purpose:
+        Verify that calling `POST /api/attendance/reset-cooldowns` clears
+        `/device_cooldowns` in Firebase RTDB and stores `cooldown_reset_at`,
+        immediately unblocking a smartphone that still holds an active local
+        `ta_device_id` cooldown cookie.
+    Inputs:
+        None.
+    Outputs:
+        None.
+    """
+    cfg = AppConfig(
+        use_mock_firebase=True,
+        jwt_secret="cooldown-reset-endpoint-test-secret-key-32-bytes",
+    )
+    repo = FirebaseRepository(use_mock=True)
+    repo.set(
+        "/students",
+        {
+            "stu_1": {
+                "student_id": "stu_1",
+                "full_name": "גיא אביב",
+                "email": "guygg197@gmail.com",
+                "group": "3",
+            },
+            "stu_2": {
+                "student_id": "stu_2",
+                "full_name": "ליאל אבידור",
+                "email": "avidorliel@gmail.com",
+                "group": "1",
+            },
+        },
+    )
+    app = create_app(config=cfg, repository=repo)
+    lec_client = TestClient(app)
+    phone_client = TestClient(app)
+
+    # Unauthenticated or student callers cannot reset cooldowns
+    assert phone_client.post("/api/attendance/reset-cooldowns").status_code == 401
+
+    # Lecturer signs in and starts Lesson 1
+    login_res = lec_client.post(
+        "/api/auth/lecturer/login",
+        json={"email": "adminL@gmail.com", "password": "12345"},
+    )
+    assert login_res.status_code == 200
+
+    lec_client.post(
+        "/api/attendance/sessions",
+        json={
+            "lesson_id": "lesson_1",
+            "lesson_title": "Lesson 1",
+            "classroom_lat": CLASSROOM_LAT,
+            "classroom_lng": CLASSROOM_LNG,
+            "geofence_radius_meters": 100,
+            "enforce_geofence": True,
+        },
+    )
+    qr_token = lec_client.get("/api/attendance/sessions/lesson_1/qr").json()["qr_token"]
+
+    # 1. Phone checks in Student 1 -> receives active ta_device_id cookie
+    first = phone_client.post(
+        "/api/attendance/checkin",
+        json={
+            "lesson_id": "lesson_1",
+            "student_id": "stu_1",
+            "qr_token": qr_token,
+            "student_lat": INSIDE_RADIUS_LAT,
+            "student_lng": INSIDE_RADIUS_LNG,
+        },
+    )
+    assert first.status_code == 200
+    assert DEVICE_COOKIE_NAME in first.cookies
+
+    # 2. Same phone (holding ta_device_id cookie) tries to check in Student 2 -> blocked (403)
+    blocked = phone_client.post(
+        "/api/attendance/checkin",
+        json={
+            "lesson_id": "lesson_1",
+            "student_id": "stu_2",
+            "qr_token": qr_token,
+            "student_lat": INSIDE_RADIUS_LAT,
+            "student_lng": INSIDE_RADIUS_LNG,
+        },
+    )
+    assert blocked.status_code == 403
+    assert "15-minute device cooldown active" in blocked.json()["detail"]
+
+    # 3. Lecturer clicks "Reset 15-Min Device Cooldowns"
+    reset_res = lec_client.post("/api/attendance/reset-cooldowns")
+    assert reset_res.status_code == 200
+    assert reset_res.json()["status"] == "cooldowns_reset"
+    assert repo.get("/device_cooldowns") is None
+    assert isinstance(repo.get("/settings/cooldown_reset_at"), int)
+
+    # 4. Same phone (STILL holding the active ta_device_id cookie!) retries immediately -> succeeds!
+    unblocked = phone_client.post(
+        "/api/attendance/checkin",
+        json={
+            "lesson_id": "lesson_1",
+            "student_id": "stu_2",
+            "qr_token": qr_token,
+            "student_lat": INSIDE_RADIUS_LAT,
+            "student_lng": INSIDE_RADIUS_LNG,
+        },
+    )
+    assert unblocked.status_code == 200
+    assert unblocked.json()["record"]["student_id"] == "stu_2"
+
+
+@pytest.mark.parametrize(
+    ("radius_meters", "inside_lat", "outside_lat"),
+    [
+        (30, 32.10455, 32.10480),   # ~17m inside vs ~45m outside 30m
+        (50, 32.10470, 32.10505),   # ~33m inside vs ~72m outside 50m
+        (100, 32.10500, 32.10600),  # ~67m inside vs ~178m outside 100m
+    ],
+)
+def test_strict_geofence_radii_30m_50m_100m_enforcement(
+    radius_meters: int, inside_lat: float, outside_lat: float
+) -> None:
+    """
+    Purpose:
+        Verify strict Haversine geofence enforcement for each interactive map radius
+        option (`30m`, `50m`, `100m`): students outside the chosen radius (or missing
+        GPS coordinates) are rejected with HTTP 403 and NOT marked present, while
+        students inside the chosen radius are verified and marked present.
+    Inputs:
+        radius_meters (int): Selected geofence radius (`30`, `50`, or `100`).
+        inside_lat (float): Student latitude inside `radius_meters`.
+        outside_lat (float): Student latitude outside `radius_meters`.
+    Outputs:
+        None.
+    """
+    cfg = AppConfig(
+        use_mock_firebase=True,
+        jwt_secret="strict-geofence-radius-test-secret-key-32-bytes",
+    )
+    repo = FirebaseRepository(use_mock=True)
+    repo.set(
+        "/students",
+        {
+            "stu_in": {
+                "student_id": "stu_in",
+                "full_name": "Student Inside",
+                "email": "inside@ariel.ac.il",
+                "group": "1",
+            },
+            "stu_out": {
+                "student_id": "stu_out",
+                "full_name": "Student Outside",
+                "email": "outside@ariel.ac.il",
+                "group": "1",
+            },
+        },
+    )
+    app = create_app(config=cfg, repository=repo)
+    lec_client = TestClient(app)
+    lec_client.post(
+        "/api/auth/lecturer/login",
+        json={"email": "adminL@gmail.com", "password": "12345"},
+    )
+
+    lesson_id = f"lesson_r{radius_meters}"
+    lec_client.post(
+        "/api/attendance/sessions",
+        json={
+            "lesson_id": lesson_id,
+            "lesson_title": f"Lesson {radius_meters}m",
+            "classroom_lat": CLASSROOM_LAT,
+            "classroom_lng": CLASSROOM_LNG,
+            "geofence_radius_meters": radius_meters,
+            "enforce_geofence": True,
+        },
+    )
+    qr_token = lec_client.get(f"/api/attendance/sessions/{lesson_id}/qr").json()["qr_token"]
+
+    # 1. Student outside the selected radius -> rejected with 403 and not marked present
+    phone_out = TestClient(app)
+    out_res = phone_out.post(
+        "/api/attendance/checkin",
+        json={
+            "lesson_id": lesson_id,
+            "student_id": "stu_out",
+            "qr_token": qr_token,
+            "student_lat": outside_lat,
+            "student_lng": CLASSROOM_LNG,
+        },
+    )
+    assert out_res.status_code == 403
+    assert f"(allowed: {radius_meters}m)" in out_res.json()["detail"]
+
+    report_after_reject = lec_client.get(f"/api/attendance/sessions/{lesson_id}").json()
+    assert report_after_reject["present_count"] == 0
+
+    # 2. Student inside the selected radius -> accepted (200) and marked present
+    phone_in = TestClient(app)
+    in_res = phone_in.post(
+        "/api/attendance/checkin",
+        json={
+            "lesson_id": lesson_id,
+            "student_id": "stu_in",
+            "qr_token": qr_token,
+            "student_lat": inside_lat,
+            "student_lng": CLASSROOM_LNG,
+        },
+    )
+    assert in_res.status_code == 200
+    assert in_res.json()["record"]["geofence_status"] == "verified"
+    assert in_res.json()["record"]["distance_meters"] <= radius_meters
+
+    report_after_accept = lec_client.get(f"/api/attendance/sessions/{lesson_id}").json()
+    assert report_after_accept["present_count"] == 1
+
+
+def test_multi_lesson_switching_and_opening_new_lesson(
+    attendance_env: tuple[AppConfig, FirebaseRepository, AttendanceManager]
+) -> None:
+    """
+    Purpose:
+        Verify that the Lecturer can create and open multiple lessons (`lesson_1`, `lesson_2`, etc.)
+        and switch back and forth between existing lessons: starting or reopening a lesson
+        automatically makes it the single active LIVE session while preserving previously
+        recorded attendance on all lessons.
+    Inputs:
+        attendance_env: Isolated attendance test fixture.
+    Outputs:
+        None.
+    """
+    _, _, manager = attendance_env
+
+    # 1. Start Lesson 1 and mark Alice present
+    s1 = manager.start_session("lesson_1", "Lesson 1: Intro", classroom_lat=CLASSROOM_LAT, classroom_lng=CLASSROOM_LNG)
+    assert s1["active"] is True
+    manager.set_manual_attendance("lesson_1", "stu_alice", "present")
+
+    # 2. Create & open Lesson 2 -> Lesson 1 is automatically deactivated, Lesson 2 is LIVE
+    s2 = manager.start_session("lesson_2", "Lesson 2: Design Patterns", classroom_lat=CLASSROOM_LAT, classroom_lng=CLASSROOM_LNG)
+    assert s2["active"] is True
+    assert manager.get_session("lesson_1")["active"] is False
+    assert manager.get_session("lesson_2")["active"] is True
+
+    # 3. Switch back to / reopen Lesson 1 -> Lesson 2 is deactivated, Lesson 1 is LIVE with Alice still present
+    s1_reopened = manager.start_session("lesson_1", "Lesson 1: Intro", classroom_lat=CLASSROOM_LAT, classroom_lng=CLASSROOM_LNG)
+    assert s1_reopened["active"] is True
+    assert manager.get_session("lesson_2")["active"] is False
+    report_l1 = manager.get_lesson_attendance_report("lesson_1")
+    assert report_l1["present_count"] == 1
+
+
+def test_student_attendance_history_unit_and_http_endpoint(
+    attendance_env: tuple[AppConfig, FirebaseRepository, AttendanceManager]
+) -> None:
+    """
+    Purpose:
+        Verify `AttendanceManager.get_student_attendance_history` and the student-accessible
+        `GET /api/attendance/my-history` endpoint return accurate Present/Absent status
+        and overall attendance rate across all lessons.
+    Inputs:
+        attendance_env: Isolated attendance test fixture.
+    Outputs:
+        None.
+    """
+    cfg, repo, manager = attendance_env
+    # Start 3 lessons; Alice attends lesson_1 (QR) and lesson_3 (manual), misses lesson_2
+    manager.start_session(
+        "lesson_1",
+        "Lesson 1: Intro",
+        classroom_lat=CLASSROOM_LAT,
+        classroom_lng=CLASSROOM_LNG,
+    )
+    qr1 = manager.generate_rotating_qr_token("lesson_1", now_ts=1_700_000_010)
+    manager.submit_qr_checkin(
+        lesson_id="lesson_1",
+        student_id="stu_alice",
+        qr_token=qr1["qr_token"],
+        student_lat=INSIDE_RADIUS_LAT,
+        student_lng=INSIDE_RADIUS_LNG,
+        now_ts=1_700_000_020,
+    )
+    manager.start_session("lesson_2", "Lesson 2: Architecture")
+    manager.start_session("lesson_3", "Lesson 3: Testing")
+    manager.set_manual_attendance("lesson_3", "stu_alice", "present")
+
+    history = manager.get_student_attendance_history("stu_alice")
+    assert history["student_id"] == "stu_alice"
+    assert history["attended_count"] == 2
+    assert history["total_lessons"] == 3
+    assert history["attendance_rate"] == 66.7
+    by_lesson = {item["lesson_id"]: item for item in history["lessons"]}
+    assert by_lesson["lesson_1"]["status"] == "present"
+    assert by_lesson["lesson_1"]["method"] == "qr"
+    assert by_lesson["lesson_2"]["status"] == "absent"
+    assert by_lesson["lesson_3"]["status"] == "present"
+    assert by_lesson["lesson_3"]["method"] == "manual"
+
+    # Verify HTTP endpoint enforcement (401 unauthenticated, 200 authenticated student)
+    app = create_app(config=cfg, repository=repo)
+    anon_client = TestClient(app)
+    assert anon_client.get("/api/attendance/my-history").status_code == 401
+
+    stu_client = TestClient(app)
+    login_res = stu_client.post(
+        "/api/auth/student/login", json={"email": "alice@ariel.ac.il"}
+    )
+    assert login_res.status_code == 200
+    http_hist = stu_client.get("/api/attendance/my-history")
+    assert http_hist.status_code == 200
+    body = http_hist.json()
+    assert body["attended_count"] == 2
+    assert body["total_lessons"] == 3
+    assert len(body["lessons"]) == 3

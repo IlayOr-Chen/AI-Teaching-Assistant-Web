@@ -10,10 +10,14 @@ Outputs:
 
 from __future__ import annotations
 
+import logging
 import mimetypes
+import re
 import time
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from fastapi import (
     FastAPI,
@@ -25,6 +29,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -42,7 +47,11 @@ from src.services.auth_service import (
     AuthService,
 )
 from src.services.comment_service import CommentService
-from src.services.gemini_client import GeminiClient
+from src.services.gemini_client import (
+    GeminiClient,
+    GeminiHighDemandError,
+    GeminiRateLimitError,
+)
 from src.services.homework_reviewer import HomeworkReviewer
 from src.services.photo_head_counter import PhotoHeadCounter
 from src.services.poll_service import PollService
@@ -83,9 +92,6 @@ DEFAULT_ROSTER_ASSET = (
     Path(__file__).resolve().parent.parent
     / "assets"
     / "courseid_130158_participants.xlsx"
-)
-DEFAULT_CLASSROOM_PHOTO_ASSET = (
-    Path(__file__).resolve().parent.parent / "assets" / "p3.jpeg"
 )
 
 
@@ -138,7 +144,7 @@ class StartAttendanceSessionRequest(BaseModel):
     """
     Purpose:
         Pydantic schema for starting or reopening a smart attendance session
-        configured with GPS Geofencing and rotating QR parameters.
+        configured with GPS Geofencing and static session QR parameters.
     Inputs:
         lesson_id (str), lesson_title (str), classroom_lat (float | None),
         classroom_lng (float | None), geofence_radius_meters (int | None),
@@ -300,7 +306,7 @@ class UpdateGeminiSettingsRequest(BaseModel):
 class CreateHomeworkAssignmentRequest(BaseModel):
     """
     Purpose:
-        Pydantic schema for creating a PDF homework assignment with a submission deadline.
+        Pydantic schema for creating a homework assignment with a submission deadline.
     Inputs:
         title (str), description (str), deadline_ts (int), lesson_tag (str).
     Outputs:
@@ -311,6 +317,36 @@ class CreateHomeworkAssignmentRequest(BaseModel):
     description: str = ""
     deadline_ts: int
     lesson_tag: str = "Lesson 1"
+
+
+class SubmitHomeworkRepoRequest(BaseModel):
+    """
+    Purpose:
+        Pydantic schema for submitting a public GitHub / Git repository URL for homework review.
+    Inputs:
+        repo_url (str), student_id (str | None), student_name (str | None).
+    Outputs:
+        Validated `SubmitHomeworkRepoRequest` instance.
+    """
+
+    repo_url: str
+    student_id: str | None = None
+    student_name: str | None = None
+
+
+class SummarizeYoutubeVideoRequest(BaseModel):
+    """
+    Purpose:
+        Pydantic schema for summarizing a public YouTube lecture video directly via Gemini.
+    Inputs:
+        youtube_url (str), lesson_tag (str), lecturer_notes (str).
+    Outputs:
+        Validated `SummarizeYoutubeVideoRequest` instance.
+    """
+
+    youtube_url: str
+    lesson_tag: str = "Lesson 1"
+    lecturer_notes: str = ""
 
 
 def create_app(
@@ -356,8 +392,8 @@ def create_app(
     fastapi_app = FastAPI(
         title="Web-Based AI Teaching Assistant",
         description=(
-            "OOP/OOD Classroom Platform: Smart QR + YOLO Attendance, Live Polls, "
-            "Threaded Comments, Gemini MP4 Lecture Summarizer, and PDF Homework Reviewer."
+            "OOP/OOD Classroom Platform: Smart QR + GPS Geofencing + YOLO Attendance, Live Polls, "
+            "Threaded Comments, YouTube Lecture Video Summarizer, and Homework Reviewer."
         ),
         version=__version__,
     )
@@ -375,9 +411,37 @@ def create_app(
     fastapi_app.state.video_summarizer = video_summarizer
     fastapi_app.state.homework_reviewer = homework_reviewer
 
+    # Seed the fixed lecturer account (adminL@gmail.com / 12345) and auto-load the
+    # 104-student Hebrew course roster from assets/courseid_130158_participants.xlsx if empty
+    try:
+        auth_service.seed_default_lecturer()
+        roster_importer.ensure_roster_seeded(DEFAULT_ROSTER_ASSET)
+    except Exception:
+        pass
+
     if STATIC_DIR.is_dir():
         fastapi_app.mount(
             "/static", StaticFiles(directory=str(STATIC_DIR)), name="static"
+        )
+
+    @fastapi_app.exception_handler(Exception)
+    async def unhandled_exception_handler(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        """
+        Purpose:
+            Ensure any unexpected unhandled server exception returns a clean JSON
+            `{"detail": ...}` payload rather than a raw HTML/text 500 response.
+        Inputs:
+            request (Request): Incoming FastAPI request.
+            exc (Exception): Unhandled exception instance.
+        Outputs:
+            JSONResponse: Structured HTTP 500 JSON error response.
+        """
+        logger.exception("Unhandled exception on %s: %s", request.url.path, exc)
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"detail": f"Server error: {exc}"},
         )
 
     @fastapi_app.get("/", response_class=HTMLResponse)
@@ -433,46 +497,24 @@ def create_app(
         return ClientIPResolver.resolve_with_source(request)
 
     @fastapi_app.post("/api/auth/lecturer/register", response_class=JSONResponse)
-    async def register_lecturer_endpoint(
-        payload: LecturerRegisterRequest, response: Response, request: Request
-    ) -> dict[str, Any]:
+    @fastapi_app.post("/api/auth/register", response_class=JSONResponse)
+    async def register_lecturer_endpoint() -> dict[str, Any]:
         """
         Purpose:
-            Register a new Lecturer account protected by `LECTURER_ACCESS_CODE`
-            and set an HTTP-only signed JWT cookie (`ta_lecturer_session`).
+            Block public lecturer self-registration. Allowed lecturer accounts are
+            strictly configured via `.env` / `AppConfig` and seeded on startup.
         Inputs:
-            payload (LecturerRegisterRequest): Registration form data.
-            response (Response): FastAPI HTTP response object used to set cookies.
-            request (Request): Incoming FastAPI HTTP request.
+            None.
         Outputs:
-            dict[str, Any]: Registered lecturer profile and JWT token.
+            Raises HTTP 403 Forbidden.
         """
-        svc: AuthService = request.app.state.auth_service
-        cfg: AppConfig = request.app.state.config
-        try:
-            result = svc.register_lecturer(
-                full_name=payload.full_name,
-                email=payload.email,
-                password=payload.password,
-                access_code=payload.access_code,
-            )
-        except PermissionError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)
-            ) from exc
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
-            ) from exc
-
-        response.set_cookie(
-            key=LECTURER_COOKIE_NAME,
-            value=result["token"],
-            httponly=True,
-            samesite="lax",
-            max_age=cfg.jwt_expiration_hours * 3600,
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Public lecturer self-registration is disabled. "
+                "Please sign in using the configured lecturer account."
+            ),
         )
-        return result
 
     @fastapi_app.post("/api/auth/lecturer/login", response_class=JSONResponse)
     async def login_lecturer_endpoint(
@@ -622,10 +664,12 @@ def create_app(
                         "Invalid roster file type. Please upload an Excel (.xlsx) file."
                     )
                 content = await file.read()
-                return importer.import_from_excel(content)
+                return await run_in_threadpool(importer.import_from_excel, content)
 
             if use_default_asset:
-                return importer.import_from_excel(DEFAULT_ROSTER_ASSET)
+                return await run_in_threadpool(
+                    importer.import_from_excel, DEFAULT_ROSTER_ASSET
+                )
 
             raise ValueError(
                 "Please upload an Excel (.xlsx) file or set use_default_asset=true."
@@ -670,7 +714,7 @@ def create_app(
         """
         Purpose:
             Lecturer-protected endpoint to activate an attendance session with
-            classroom GPS geofencing coordinates, radius, and rotating QR settings.
+            classroom GPS geofencing coordinates, radius, and a static session QR token.
         Inputs:
             payload (StartAttendanceSessionRequest): Lesson ID, title, and GPS geofence settings.
             request (Request): Incoming FastAPI request.
@@ -712,16 +756,25 @@ def create_app(
     async def list_attendance_sessions_endpoint(request: Request) -> dict[str, Any]:
         """
         Purpose:
-            Lecturer-protected listing of all attendance sessions stored in Firebase RTDB.
+            Lecturer-protected listing of all attendance sessions stored in Firebase RTDB,
+            along with runtime attendance defaults from `AppConfig` (`default_geofence_radius_meters`
+            and `default_enforce_geofence`) so the frontend initializes directly from `.env`.
         Inputs:
             request (Request): Incoming FastAPI request (requires Lecturer JWT).
         Outputs:
-            dict[str, Any]: Dictionary with `count` and `sessions`.
+            dict[str, Any]: Dictionary with `count`, `sessions`, `default_geofence_radius_meters`,
+            and `default_enforce_geofence`.
         """
         request.app.state.auth_service.require_lecturer_claims(request)
         mgr: AttendanceManager = request.app.state.attendance_manager
+        cfg: AppConfig = request.app.state.config
         sessions = mgr.list_sessions()
-        return {"count": len(sessions), "sessions": sessions}
+        return {
+            "count": len(sessions),
+            "sessions": sessions,
+            "default_geofence_radius_meters": int(cfg.geofence_radius_meters),
+            "default_enforce_geofence": bool(cfg.enforce_geofence_default),
+        }
 
     @fastapi_app.get(
         "/api/attendance/checkin-context", response_class=JSONResponse
@@ -734,13 +787,13 @@ def create_app(
         """
         Purpose:
             Public, QR-gated endpoint for the student mobile check-in page. It verifies the
-            scanned rotating token and, only then, returns the lesson title, GPS geofencing
-            requirements, and the list of roster names (`student_id` + `full_name`, no emails/groups)
+            scanned session QR token and, only then, returns the lesson title, GPS geofencing
+            requirements, and the list of roster names (`student_id` + `full_name`)
             for the searchable dropdown.
         Inputs:
             request (Request): Incoming FastAPI request.
             lesson_id (str): Lesson identifier from the QR link.
-            qr_token (str): Signed rotating QR token from the QR link.
+            qr_token (str): Static session QR token from the QR link.
         Outputs:
             dict[str, Any]: `lesson_id`, `lesson_title`, `enforce_geofence`,
             `geofence_radius_meters`, `has_classroom_coords`, and `students`.
@@ -761,7 +814,11 @@ def create_app(
             ) from exc
 
         names = [
-            {"student_id": stu["student_id"], "full_name": stu.get("full_name", "")}
+            {
+                "student_id": stu["student_id"],
+                "full_name": stu.get("full_name", ""),
+                "email": stu.get("email", ""),
+            }
             for stu in importer.list_students()
         ]
         has_coords = (
@@ -776,6 +833,59 @@ def create_app(
             "has_classroom_coords": has_coords,
             "students": names,
         }
+
+    @fastapi_app.get("/api/attendance/my-history", response_class=JSONResponse)
+    async def student_attendance_history_endpoint(
+        request: Request,
+        student_id: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Student-accessible endpoint returning chronological per-lesson attendance
+            history (`present` or `absent`) and overall attendance percentage for the
+            authenticated student (or a target `student_id` when called by Lecturer).
+        Inputs:
+            request (Request): Incoming FastAPI request with student or lecturer JWT session.
+            student_id (str | None): Optional student ID override when requested by Lecturer.
+        Outputs:
+            dict[str, Any]: Attendance history summary (`attended_count`, `total_lessons`,
+            `attendance_rate`, `lessons`).
+        """
+        svc: AuthService = request.app.state.auth_service
+        auth_header = request.headers.get("Authorization", "").strip()
+        bearer = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else None
+        student_cookie = request.cookies.get(STUDENT_COOKIE_NAME)
+        lecturer_cookie = request.cookies.get(LECTURER_COOKIE_NAME)
+
+        claims: dict[str, Any] | None = None
+        for tok in (student_cookie, bearer, lecturer_cookie):
+            if not tok:
+                continue
+            try:
+                claims = svc.verify_jwt_token(tok)
+                break
+            except Exception:
+                continue
+
+        if claims is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Please sign in as a student to view your attendance history.",
+            )
+
+        role = str(claims.get("role", "student"))
+        if role == "lecturer" and student_id and student_id.strip():
+            target_sid = student_id.strip()
+        else:
+            target_sid = str(claims.get("sub", "")).strip()
+
+        mgr: AttendanceManager = request.app.state.attendance_manager
+        try:
+            return await run_in_threadpool(mgr.get_student_attendance_history, target_sid)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
 
     @fastapi_app.get(
         "/api/attendance/sessions/{lesson_id}", response_class=JSONResponse
@@ -868,13 +978,13 @@ def create_app(
     ) -> dict[str, Any]:
         """
         Purpose:
-            Lecturer-protected endpoint generating a fresh short-lived signed QR token
-            and Base64 PNG QR image for the live rotating classroom display.
+            Lecturer-protected endpoint returning the static session QR token
+            and Base64 PNG QR image for the active classroom display.
         Inputs:
             lesson_id (str): Active lesson identifier.
             request (Request): Incoming FastAPI request.
         Outputs:
-            dict[str, Any]: Rotating QR payload (`qr_token`, `qr_image_data_url`, `ttl_seconds`).
+            dict[str, Any]: Static session QR payload (`qr_token`, `checkin_url`, `qr_image_data_url`).
         """
         svc: AuthService = request.app.state.auth_service
         svc.require_lecturer_claims(request)
@@ -889,7 +999,6 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             ) from exc
-        # server_time lets the browser compute the countdown without trusting its own clock
         return {**payload, "server_time": int(time.time())}
 
     @fastapi_app.post("/api/attendance/checkin", response_class=JSONResponse)
@@ -899,7 +1008,7 @@ def create_app(
         """
         Purpose:
             Student mobile QR check-in endpoint enforcing:
-            1) Cryptographically signed rotating QR token validity (~8s rotation + grace window),
+            1) Active lesson session & static session QR token validity,
             2) GPS Geofencing validation via Haversine distance (when enabled),
             3) 15-Minute Device Cooldown via signed HTTP-only cookie + Firebase RTDB.
         Inputs:
@@ -939,6 +1048,24 @@ def create_app(
             max_age=cfg.device_cooldown_minutes * 60,
         )
         return result
+
+    @fastapi_app.post("/api/attendance/reset-cooldowns", response_class=JSONResponse)
+    async def reset_device_cooldowns_endpoint(request: Request) -> dict[str, Any]:
+        """
+        Purpose:
+            Lecturer-protected endpoint that clears all `/device_cooldowns` records
+            in Firebase RTDB and updates `/settings/cooldown_reset_at` so any device
+            (even one still holding an active cooldown cookie) is immediately unblocked.
+        Inputs:
+            request (Request): Incoming FastAPI request (requires Lecturer JWT).
+        Outputs:
+            dict[str, Any]: Confirmation dictionary with `status` and `cooldown_reset_at`.
+        """
+        svc: AuthService = request.app.state.auth_service
+        svc.require_lecturer_claims(request)
+
+        mgr: AttendanceManager = request.app.state.attendance_manager
+        return mgr.reset_all_device_cooldowns()
 
     @fastapi_app.post(
         "/api/attendance/sessions/{lesson_id}/manual", response_class=JSONResponse
@@ -1026,50 +1153,41 @@ def create_app(
         file: UploadFile | None = File(default=None),
         lesson_id: str | None = Query(default=None),
         registered_count: int | None = Query(default=None),
-        use_default_asset: bool = Query(default=False),
     ) -> dict[str, Any]:
         """
         Purpose:
             Lecturer-protected endpoint that runs local Ultralytics YOLO person detection
-            on an uploaded classroom photo (or `/assets/p3.jpeg` when `use_default_asset=true`),
-            returns the annotated image with bounding boxes and confidence scores, and
-            computes the GREEN / ORANGE / RED status indicator against self-registered attendance.
+            on an uploaded classroom photo in a worker thread, persists and returns the
+            annotated image Data URL with bounding boxes and confidence scores, and computes
+            the GREEN / ORANGE / RED status indicator against self-registered attendance.
         Inputs:
             request (Request): Incoming FastAPI request (requires Lecturer JWT).
-            file (UploadFile | None): Uploaded JPEG/PNG classroom photo.
+            file (UploadFile | None): Uploaded JPEG/PNG/WebP classroom photo.
             lesson_id (str | None): Optional lesson session ID to link and compare with.
             registered_count (int | None): Optional override for self-registered student count.
-            use_default_asset (bool): When True and no file is uploaded, analyzes `/assets/p3.jpeg`.
         Outputs:
-            dict[str, Any]: Full YOLO headcount report and annotated image Data URL.
+            dict[str, Any]: Full YOLO headcount report and persisted annotated image Data URL.
         """
         svc: AuthService = request.app.state.auth_service
         svc.require_lecturer_claims(request)
 
         counter: PhotoHeadCounter = request.app.state.photo_head_counter
         try:
-            if file is not None:
-                filename = (file.filename or "").lower()
-                if not filename.endswith((".jpg", ".jpeg", ".png", ".webp")):
-                    raise ValueError(
-                        "Invalid photo file type. Please upload a JPEG, PNG, or WebP classroom photo."
-                    )
-                image_bytes = await file.read()
-                return counter.analyze_classroom_photo(
-                    image_source=image_bytes,
-                    lesson_id=lesson_id,
-                    registered_count=registered_count,
+            if file is None:
+                raise ValueError(
+                    "Please upload a classroom photo (JPEG, PNG, or WebP)."
                 )
-
-            if use_default_asset:
-                return counter.analyze_classroom_photo(
-                    image_source=DEFAULT_CLASSROOM_PHOTO_ASSET,
-                    lesson_id=lesson_id,
-                    registered_count=registered_count,
+            filename = (file.filename or "").lower()
+            if not filename.endswith((".jpg", ".jpeg", ".png", ".webp")):
+                raise ValueError(
+                    "Invalid photo file type. Please upload a JPEG, PNG, or WebP classroom photo."
                 )
-
-            raise ValueError(
-                "Please upload a classroom photo or set use_default_asset=true."
+            image_bytes = await file.read()
+            return await run_in_threadpool(
+                counter.analyze_classroom_photo,
+                image_source=image_bytes,
+                lesson_id=lesson_id,
+                registered_count=registered_count,
             )
         except FileNotFoundError as exc:
             raise HTTPException(
@@ -1080,36 +1198,84 @@ def create_app(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             ) from exc
 
-    def _resolve_caller_identity(request: Request) -> dict[str, str]:
+    @fastapi_app.delete("/api/attendance/headcount", response_class=JSONResponse)
+    @fastapi_app.post("/api/attendance/headcount/reset", response_class=JSONResponse)
+    async def reset_classroom_headcount_endpoint(
+        request: Request,
+        lesson_id: str = Query(...),
+    ) -> dict[str, Any]:
         """
         Purpose:
-            Inspect the caller's JWT cookie/header and return their `id`, `name`,
-            and `role` (`"lecturer"` or `"student"`), falling back to a signed
-            device cookie or guest student identity when unauthenticated.
+            Lecturer-protected endpoint to clear the saved YOLO headcount, discrepancy status,
+            and annotated classroom photo for `lesson_id`.
+        Inputs:
+            request (Request): Incoming FastAPI request (requires Lecturer JWT).
+            lesson_id (str): Target lesson identifier.
+        Outputs:
+            dict[str, Any]: Reset confirmation dictionary.
+        """
+        svc: AuthService = request.app.state.auth_service
+        svc.require_lecturer_claims(request)
+
+        counter: PhotoHeadCounter = request.app.state.photo_head_counter
+        try:
+            return await run_in_threadpool(counter.reset_headcount, lesson_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+    def _resolve_caller_identity(
+        request: Request, prefer_role: str | None = None
+    ) -> dict[str, str]:
+        """
+        Purpose:
+            Inspect the caller's JWT cookies/header and return their Firebase-safe `id`,
+            `name`, and `role` (`"lecturer"` or `"student"`), falling back to a signed
+            device cookie or sanitized IP identity when unauthenticated.
         Inputs:
             request (Request): Incoming FastAPI request.
+            prefer_role (str | None): Optional preferred role (`"student"` or `"lecturer"`).
         Outputs:
             dict[str, str]: Dictionary with keys `"id"`, `"name"`, and `"role"`.
         """
         svc: AuthService = request.app.state.auth_service
-        token = svc.extract_token_from_request(request)
-        if token:
+        candidate_tokens: list[str] = []
+        auth_header = request.headers.get("Authorization", "").strip()
+        if auth_header.lower().startswith("bearer "):
+            candidate_tokens.append(auth_header[7:].strip())
+
+        if prefer_role == "student":
+            cookie_order = (STUDENT_COOKIE_NAME, LECTURER_COOKIE_NAME)
+        else:
+            cookie_order = (LECTURER_COOKIE_NAME, STUDENT_COOKIE_NAME)
+
+        for cookie_name in cookie_order:
+            cookie_val = request.cookies.get(cookie_name)
+            if cookie_val and cookie_val not in candidate_tokens:
+                candidate_tokens.append(cookie_val)
+
+        for tok in candidate_tokens:
             try:
-                claims = svc.verify_jwt_token(token)
+                claims = svc.verify_jwt_token(tok)
+                raw_sub = str(claims.get("sub", "guest")).strip()
+                safe_sub = re.sub(r"[.$#\[\]/]", "_", raw_sub) or "guest"
                 return {
-                    "id": str(claims.get("sub", "guest")),
+                    "id": safe_sub,
                     "name": str(claims.get("full_name", "Student")),
                     "role": str(claims.get("role", "student")),
                 }
             except Exception:
-                pass
+                continue
 
         mgr: AttendanceManager = request.app.state.attendance_manager
         dev_id = mgr.verify_signed_device_cookie(
             request.cookies.get(DEVICE_COOKIE_NAME)
         )
+        raw_fallback = dev_id or f"ip_{ClientIPResolver.resolve(request)}"
+        safe_fallback = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_fallback) or "guest_student"
         return {
-            "id": dev_id or f"ip_{ClientIPResolver.resolve(request)}",
+            "id": safe_fallback,
             "name": "Student",
             "role": "student",
         }
@@ -1354,14 +1520,15 @@ def create_app(
         return gemini.get_settings()
 
     @fastapi_app.put("/api/settings/gemini", response_class=JSONResponse)
+    @fastapi_app.post("/api/settings/gemini", response_class=JSONResponse)
     async def update_gemini_settings_endpoint(
         payload: UpdateGeminiSettingsRequest, request: Request
     ) -> dict[str, Any]:
         """
         Purpose:
             Lecturer-protected endpoint allowing the Lecturer to enter/update their
-            Gemini API Key and configure the Gemini Model ID (e.g., `gemini-2.5-flash-lite`
-            or custom `gemini-3.5-flash-lite`).
+            Gemini API Key and configure the Gemini Model ID (defaulting to `gemini-3.5-flash-lite`
+            with support for presets like `gemini-3.5-flash`, `gemini-2.5-flash`, or custom IDs).
         Inputs:
             payload (UpdateGeminiSettingsRequest): New API key and/or model ID.
             request (Request): Incoming FastAPI request.
@@ -1381,24 +1548,41 @@ def create_app(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             ) from exc
 
-    @fastapi_app.post("/api/video/summarize", response_class=JSONResponse)
-    async def summarize_lecture_video_endpoint(
+    @fastapi_app.delete("/api/settings/gemini", response_class=JSONResponse)
+    async def clear_gemini_settings_key_endpoint(
         request: Request,
-        file: UploadFile = File(...),
-        lesson_tag: str = Query(default="Lesson 1"),
-        lecturer_notes: str = Query(default=""),
     ) -> dict[str, Any]:
         """
         Purpose:
-            Lecturer-protected endpoint for Feature 4 (ML Lecture Video Summary).
-            Strictly accepts `.mp4` files only, analyzes the lecture via `VideoSummarizer`
-            and `GeminiClient`, and returns a concise structured summary (Executive Summary,
-            Key Topics, Core Takeaways, Action Items, and Lecturer Delivery Insights).
+            Lecturer-protected endpoint that explicitly clears/deletes the stored
+            Gemini API key in Firebase RTDB (`/settings/gemini`) while keeping the
+            configured model ID, returning `has_api_key=False` and `has_key=False`.
         Inputs:
             request (Request): Incoming FastAPI request.
-            file (UploadFile): Uploaded `.mp4` lecture video file.
-            lesson_tag (str): Associated lesson identifier tag.
-            lecturer_notes (str): Optional context notes.
+        Outputs:
+            dict[str, Any]: Updated Gemini settings dictionary with `has_api_key=False`.
+        """
+        svc: AuthService = request.app.state.auth_service
+        svc.require_lecturer_claims(request)
+
+        gemini: GeminiClient = request.app.state.gemini_client
+        return gemini.update_settings(api_key="")
+
+    @fastapi_app.post("/api/video/summarize-youtube", response_class=JSONResponse)
+    async def summarize_youtube_video_endpoint(
+        payload: SummarizeYoutubeVideoRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Lecturer-protected endpoint for Feature 4 (AI Lecture Video Summary — YouTube Only).
+            Canonicalizes the public YouTube video URL, fetches the real title via oEmbed,
+            runs the automatic 2-step fast strategy (`youtube-transcript-api` -> Gemini text
+            analysis, or fallback to direct YouTube URI with `VideoMetadata(fps=0.1)`), and
+            persists the rich structured academic summary under `/video_summaries`.
+        Inputs:
+            payload (SummarizeYoutubeVideoRequest): Public YouTube URL, lesson tag, and notes.
+            request (Request): Incoming FastAPI request.
         Outputs:
             dict[str, Any]: Structured lecture video summary record.
         """
@@ -1406,18 +1590,38 @@ def create_app(
         svc.require_lecturer_claims(request)
 
         summarizer: VideoSummarizer = request.app.state.video_summarizer
+        header_api_key = request.headers.get("X-Gemini-Api-Key")
+        header_model = request.headers.get("X-Gemini-Model")
         try:
-            raw_bytes = await file.read()
-            return summarizer.summarize_video(
-                filename=file.filename or "",
-                video_bytes=raw_bytes,
-                content_type=file.content_type,
-                lesson_tag=lesson_tag,
-                lecturer_notes=lecturer_notes,
+            return await run_in_threadpool(
+                summarizer.summarize_video,
+                youtube_url=payload.youtube_url,
+                lesson_tag=payload.lesson_tag,
+                lecturer_notes=payload.lecturer_notes,
+                gemini_api_key=header_api_key,
+                gemini_model_id=header_model,
             )
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+        except GeminiRateLimitError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)
+            ) from exc
+        except GeminiHighDemandError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from exc
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+            ) from exc
+        except Exception as exc:
+            logger.exception("Unexpected error during YouTube video summarization: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"YouTube video summarization failed: {exc}",
             ) from exc
 
     @fastapi_app.get("/api/video/summaries", response_class=JSONResponse)
@@ -1433,6 +1637,36 @@ def create_app(
         summarizer: VideoSummarizer = request.app.state.video_summarizer
         items = summarizer.list_summaries()
         return {"count": len(items), "summaries": items}
+
+    @fastapi_app.delete(
+        "/api/video/summaries/{summary_id}", response_class=JSONResponse
+    )
+    async def delete_video_summary_endpoint(
+        summary_id: str, request: Request
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Lecturer-protected endpoint removing a saved video summary from Firebase
+            RTDB under `/video_summaries/{summary_id}`.
+        Inputs:
+            summary_id (str): Target summary identifier.
+            request (Request): Incoming FastAPI request (requires Lecturer JWT).
+        Outputs:
+            dict[str, Any]: Deletion confirmation payload.
+        """
+        svc: AuthService = request.app.state.auth_service
+        svc.require_lecturer_claims(request)
+
+        summarizer: VideoSummarizer = request.app.state.video_summarizer
+        try:
+            return await run_in_threadpool(summarizer.delete_summary, summary_id)
+        except ValueError as exc:
+            status_code = (
+                status.HTTP_404_NOT_FOUND
+                if "not found" in str(exc).lower()
+                else status.HTTP_400_BAD_REQUEST
+            )
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
     @fastapi_app.post("/api/homework/assignments", response_class=JSONResponse)
     async def create_homework_assignment_endpoint(
@@ -1501,7 +1735,9 @@ def create_app(
 
         reviewer: HomeworkReviewer = request.app.state.homework_reviewer
         try:
-            return reviewer.end_submission_now(assignment_id=assignment_id)
+            return await run_in_threadpool(
+                reviewer.end_submission_now, assignment_id=assignment_id
+            )
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
@@ -1514,39 +1750,62 @@ def create_app(
     async def submit_homework_pdf_endpoint(
         assignment_id: str,
         request: Request,
-        file: UploadFile = File(...),
+        file: UploadFile | None = File(default=None),
+        repo_url: str | None = Query(default=None),
         student_id: str | None = Query(default=None),
         student_name: str | None = Query(default=None),
     ) -> dict[str, Any]:
         """
         Purpose:
-            Student PDF homework submission endpoint enforcing:
-            1) Strict `.pdf` file extension, MIME type, and `%PDF` header validation,
-            2) Open submission deadline check (rejects uploads after deadline or "End Submission Now"),
-            3) Gated Release Rule (withholds AI review and peer comparison while submissions remain open).
+            Student homework submission endpoint supporting both multi-format file uploads
+            (`.pdf`, `.docx`, `.txt`, `.md`, `.zip`, `.py`, `.java`, `.c`, `.cpp`, `.h`,
+            `.js`, `.ts`, `.html`, `.css`, `.json`) and public GitHub repository URLs (`repo_url`),
+            while enforcing the deadline check and Gated Release Rule.
         Inputs:
             assignment_id (str): Target homework assignment ID.
             request (Request): Incoming FastAPI request.
-            file (UploadFile): Uploaded `.pdf` homework file.
+            file (UploadFile | None): Uploaded homework file.
+            repo_url (str | None): Optional public GitHub repository URL.
             student_id (str | None): Optional student ID override.
             student_name (str | None): Optional student display name override.
         Outputs:
             dict[str, Any]: Gated submission confirmation receipt.
         """
-        caller = _resolve_caller_identity(request)
+        caller = _resolve_caller_identity(request, prefer_role="student")
         effective_id = (student_id or "").strip() or caller["id"]
         effective_name = (student_name or "").strip() or caller["name"]
+        header_api_key = request.headers.get("X-Gemini-Api-Key")
+        header_model = request.headers.get("X-Gemini-Model") or "gemini-3.5-flash-lite"
 
         reviewer: HomeworkReviewer = request.app.state.homework_reviewer
         try:
+            if repo_url and repo_url.strip():
+                return await run_in_threadpool(
+                    reviewer.submit_homework_pdf,
+                    assignment_id=assignment_id,
+                    student_id=effective_id,
+                    student_name=effective_name,
+                    repo_url=repo_url.strip(),
+                    gemini_api_key=header_api_key,
+                    gemini_model_id=header_model,
+                    require_student_key=True,
+                )
+            if file is None:
+                raise ValueError(
+                    "Please upload a supported homework file or provide a public Git repository URL."
+                )
             pdf_bytes = await file.read()
-            return reviewer.submit_homework_pdf(
+            return await run_in_threadpool(
+                reviewer.submit_homework_pdf,
                 assignment_id=assignment_id,
                 student_id=effective_id,
                 student_name=effective_name,
                 filename=file.filename or "",
                 pdf_bytes=pdf_bytes,
                 content_type=file.content_type,
+                gemini_api_key=header_api_key,
+                gemini_model_id=header_model,
+                require_student_key=True,
             )
         except PermissionError as exc:
             raise HTTPException(
@@ -1559,6 +1818,92 @@ def create_app(
                 else status.HTTP_400_BAD_REQUEST
             )
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        except GeminiRateLimitError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)
+            ) from exc
+        except GeminiHighDemandError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from exc
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+            ) from exc
+        except Exception as exc:
+            logger.exception("Unexpected error during homework submission: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Homework submission failed: {exc}",
+            ) from exc
+
+    @fastapi_app.post(
+        "/api/homework/assignments/{assignment_id}/submit-repo",
+        response_class=JSONResponse,
+    )
+    async def submit_homework_repo_endpoint(
+        assignment_id: str,
+        payload: SubmitHomeworkRepoRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        """
+        Purpose:
+            Student endpoint for submitting a public GitHub / Git repository URL
+            for homework review under the Gated Release Rule.
+        Inputs:
+            assignment_id (str): Target homework assignment ID.
+            payload (SubmitHomeworkRepoRequest): Public repository URL and optional student identity.
+            request (Request): Incoming FastAPI request.
+        Outputs:
+            dict[str, Any]: Gated submission confirmation receipt.
+        """
+        caller = _resolve_caller_identity(request, prefer_role="student")
+        effective_id = (payload.student_id or "").strip() or caller["id"]
+        effective_name = (payload.student_name or "").strip() or caller["name"]
+        header_api_key = request.headers.get("X-Gemini-Api-Key")
+        header_model = request.headers.get("X-Gemini-Model") or "gemini-3.5-flash-lite"
+
+        reviewer: HomeworkReviewer = request.app.state.homework_reviewer
+        try:
+            return await run_in_threadpool(
+                reviewer.submit_homework_pdf,
+                assignment_id=assignment_id,
+                student_id=effective_id,
+                student_name=effective_name,
+                repo_url=payload.repo_url,
+                gemini_api_key=header_api_key,
+                gemini_model_id=header_model,
+                require_student_key=True,
+            )
+        except PermissionError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)
+            ) from exc
+        except ValueError as exc:
+            status_code = (
+                status.HTTP_404_NOT_FOUND
+                if "not found" in str(exc).lower()
+                else status.HTTP_400_BAD_REQUEST
+            )
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        except GeminiRateLimitError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)
+            ) from exc
+        except GeminiHighDemandError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from exc
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+            ) from exc
+        except Exception as exc:
+            logger.exception("Unexpected error during Git repo homework submission: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Git repository homework submission failed: {exc}",
+            ) from exc
 
     @fastapi_app.get(
         "/api/homework/assignments/{assignment_id}/review",
@@ -1584,17 +1929,43 @@ def create_app(
         """
         caller = _resolve_caller_identity(request)
         target_student_id = (student_id or "").strip() or caller["id"]
+        header_api_key = request.headers.get("X-Gemini-Api-Key")
+        header_model = request.headers.get("X-Gemini-Model") or "gemini-3.5-flash-lite"
 
         reviewer: HomeworkReviewer = request.app.state.homework_reviewer
         try:
-            return reviewer.get_student_review_and_comparison(
+            return await run_in_threadpool(
+                reviewer.get_student_review_and_comparison,
                 assignment_id=assignment_id,
                 student_id=target_student_id,
                 viewer_role=caller["role"],
+                gemini_api_key=header_api_key,
+                gemini_model_id=header_model,
             )
         except ValueError as exc:
+            status_code = (
+                status.HTTP_404_NOT_FOUND
+                if "not found" in str(exc).lower() or "no homework" in str(exc).lower()
+                else status.HTTP_400_BAD_REQUEST
+            )
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        except GeminiRateLimitError as exc:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)
+            ) from exc
+        except GeminiHighDemandError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from exc
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+            ) from exc
+        except Exception as exc:
+            logger.exception("Unexpected error fetching homework review: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to retrieve homework review: {exc}",
             ) from exc
 
     return fastapi_app

@@ -1,8 +1,8 @@
 """
 Purpose:
     Domain services package for authentication, roster import, smart attendance,
-    YOLO headcount, live polls, threaded comments, Gemini client, MP4 lecture video
-    summarization, and PDF homework review & peer comparison.
+    YOLO headcount, live polls, threaded comments, Gemini client, YouTube lecture
+    video summarization, and multi-format / GitHub homework review & peer comparison.
 Inputs:
     None.
 Outputs:

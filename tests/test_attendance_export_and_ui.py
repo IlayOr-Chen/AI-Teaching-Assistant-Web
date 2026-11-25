@@ -42,12 +42,10 @@ def _setup_authenticated_lecturer_client() -> TestClient:
     client = TestClient(create_app(config=cfg, repository=repo))
 
     reg = client.post(
-        "/api/auth/lecturer/register",
+        "/api/auth/lecturer/login",
         json={
-            "full_name": "Prof. Boaz",
-            "email": "boaz@ariel.ac.il",
-            "password": "StrongPassword2026",
-            "access_code": "TA-ADMIN-2026",
+            "email": "adminL@gmail.com",
+            "password": "12345",
         },
     )
     assert reg.status_code == 200
@@ -200,16 +198,26 @@ def test_attendance_management_and_yolo_ui_wiring() -> None:
     assert js_res.status_code == 200
     for expected in (
         "renderRosterAndHeadcountTab",
-        "Roster & YOLO Headcount",
+        "label: 'Roster'",
         "Export CSV (.csv)",
         "Export Excel (.xlsx)",
-        "Test on Classroom Photo (p3.jpeg)",
+        "Upload classroom photo",
+        "Reset YOLO",
+        "Lesson Scope",
         "YOLO Detected Count",
         "Self-Registered Count",
         "Mark Present",
         "Mark Absent",
     ):
         assert expected in js_res.text, f"Missing '{expected}' in lecturer.js"
+    assert "p3.jpeg" not in js_res.text
+    assert "Test on Classroom Photo" not in js_res.text
+
+    stu_res = client.get("/static/js/student.js")
+    assert stu_res.status_code == 200
+    assert "My Attendance History" in stu_res.text
+    assert "inside the classroom GPS geofence" in stu_res.text
+    assert "on the classroom network" not in stu_res.text
 
     css_res = client.get("/static/css/styles.css")
     assert css_res.status_code == 200

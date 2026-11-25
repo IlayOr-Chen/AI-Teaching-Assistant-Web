@@ -28,22 +28,17 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 def test_required_course_assets_exist() -> None:
     """
     Purpose:
-        Verify that all required real-world evaluation assets exist in `/assets`.
+        Verify that the required course roster Excel asset exists in `/assets`.
     Inputs:
         None.
     Outputs:
-        None (asserts existence and non-zero size of Excel, JPEG, and DOCX assets).
+        None (asserts existence and non-zero size of the Excel participants asset).
     """
     assets_dir = PROJECT_ROOT / "assets"
     assert assets_dir.is_dir(), "Expected /assets directory to exist."
 
     excel_file = assets_dir / "courseid_130158_participants.xlsx"
-    photo_file = assets_dir / "p3.jpeg"
-    zoom_docx_candidates = list(assets_dir.glob("Example_ Class*by zoom).docx"))
-
     assert excel_file.is_file() and excel_file.stat().st_size > 0
-    assert photo_file.is_file() and photo_file.stat().st_size > 0
-    assert len(zoom_docx_candidates) == 1 and zoom_docx_candidates[0].stat().st_size > 0
 
 
 def test_app_config_defaults_and_env_loading(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -56,16 +51,16 @@ def test_app_config_defaults_and_env_loading(monkeypatch: pytest.MonkeyPatch) ->
     Outputs:
         None.
     """
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
     monkeypatch.setenv("USE_MOCK_FIREBASE", "true")
-    monkeypatch.setenv("QR_ROTATION_SECONDS", "15")
+    monkeypatch.setenv("GEOFENCE_RADIUS_METERS", "50")
     monkeypatch.setenv("DEVICE_COOLDOWN_MINUTES", "15")
-    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 
     cfg = AppConfig.from_env()
     assert cfg.use_mock_firebase is True
-    assert cfg.qr_rotation_seconds == 15
+    assert cfg.geofence_radius_meters == 50
     assert cfg.device_cooldown_minutes == 15
-    assert cfg.gemini_model == "gemini-2.5-flash-lite"
+    assert cfg.gemini_model == "gemini-3.5-flash-lite"
     assert "ai-teaching-assistant-web-default-rtdb.firebaseio.com" in cfg.firebase_db_url
 
 
