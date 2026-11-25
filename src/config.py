@@ -20,26 +20,25 @@ class AppConfig:
     """
     Purpose:
         Immutable configuration value object holding Firebase RTDB, JWT auth,
-        smart attendance (static session QR, GPS geofencing, 15-min cooldown), YOLO headcount,
-        and Gemini LLM parameters.
+        smart attendance (static session QR, GPS geofencing, 15-min cooldown),
+        YOLO headcount, and default Gemini model parameters.
     Inputs:
         firebase_db_url (str): Target Firebase Realtime Database root URL.
         firebase_credentials_path (str): File path to `serviceAccountKey.json`.
         use_mock_firebase (bool): When True, uses the deterministic in-memory
             Firebase adapter instead of hitting production Firebase RTDB.
-        jwt_secret (str): Secret key used to sign and verify JWT cookies and QR tokens.
+        jwt_secret (str): Secret key used to sign and verify JWT cookies and device cookies.
         jwt_algorithm (str): HMAC signing algorithm (default `HS256`).
         jwt_expiration_hours (int): Lecturer session token validity duration in hours.
         lecturer_email (str): Pre-configured lecturer login email (default `adminL@gmail.com`).
         lecturer_password (str): Pre-configured lecturer login password (default `12345`).
         lecturer_name (str): Display name for the seeded lecturer account.
-        lecturer_access_code (str): Shared access gate for programmatic lecturer setup.
-        qr_rotation_seconds (int): UI rotation interval of each attendance QR token in seconds (default 8s).
-        qr_grace_seconds (int): Extra server-side grace seconds after rotation (~15s total token validity).
+        lecturer_access_code (str): Internal programmatic gate for `AuthService.register_lecturer`
+            unit tests (public HTTP self-registration is disabled with 403).
         device_cooldown_minutes (int): Cooldown period in minutes enforced per student device (15m).
         enforce_geofence_default (bool): Default state for GPS Geofencing check (True).
         geofence_radius_meters (int): Default allowed Haversine radius in meters around the classroom (100m).
-        gemini_api_key (str): Optional Google Gemini API key fallback (BYOK keys are provided via UI/headers).
+        gemini_api_key (str): Optional programmatic fallback used only in tests (production is pure BYOK).
         gemini_model (str): Default Gemini model identifier (default `gemini-3.5-flash-lite`).
         yolo_model_path (str): Path or model name for Ultralytics YOLO weights.
         yolo_confidence_threshold (float): Minimum detection confidence for person bounding boxes.
@@ -59,8 +58,6 @@ class AppConfig:
     lecturer_password: str = "12345"
     lecturer_name: str = "Course Lecturer"
     lecturer_access_code: str = "TA-ADMIN-2026"
-    qr_rotation_seconds: int = 8
-    qr_grace_seconds: int = 7
     device_cooldown_minutes: int = 15
     enforce_geofence_default: bool = True
     geofence_radius_meters: int = 100
@@ -86,7 +83,6 @@ class AppConfig:
         else:
             load_dotenv(override=False)
 
-        # Parse boolean strings ("true", "1", "yes") safely into Python booleans
         use_mock_raw = os.getenv("USE_MOCK_FIREBASE", "false").strip().lower()
         use_mock = use_mock_raw in {"true", "1", "yes"}
 
@@ -110,13 +106,9 @@ class AppConfig:
             lecturer_email=os.getenv("LECTURER_EMAIL", "adminL@gmail.com").strip(),
             lecturer_password=os.getenv("LECTURER_PASSWORD", "12345").strip(),
             lecturer_name=os.getenv("LECTURER_NAME", "Course Lecturer").strip(),
-            lecturer_access_code=os.getenv("LECTURER_ACCESS_CODE", "TA-ADMIN-2026").strip(),
-            qr_rotation_seconds=int(os.getenv("QR_ROTATION_SECONDS", "8")),
-            qr_grace_seconds=int(os.getenv("QR_GRACE_SECONDS", "7")),
             device_cooldown_minutes=int(os.getenv("DEVICE_COOLDOWN_MINUTES", "15")),
             enforce_geofence_default=enforce_geofence,
             geofence_radius_meters=int(os.getenv("GEOFENCE_RADIUS_METERS", "100")),
-            gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip(),
             gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip(),
             yolo_model_path=os.getenv("YOLO_MODEL_PATH", "yolov8n.pt").strip(),
             yolo_confidence_threshold=float(

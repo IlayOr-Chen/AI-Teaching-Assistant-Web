@@ -106,8 +106,6 @@ classDiagram
         +str lecturer_password
         +str lecturer_name
         +str lecturer_access_code
-        +int qr_rotation_seconds
-        +int qr_grace_seconds
         +int device_cooldown_minutes
         +bool enforce_geofence_default
         +int geofence_radius_meters

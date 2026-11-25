@@ -106,6 +106,7 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
             "Reset 15-Min Device Cooldowns",
             "Use My Current Location",
             "RADIUS_OPTIONS = [30, 50, 100]",
+            "default_geofence_radius_meters",
             "invalidateSize()",
             "Copy Link",
             "Scan to check in — protected by GPS Geofencing & 15-min device cooldown.",

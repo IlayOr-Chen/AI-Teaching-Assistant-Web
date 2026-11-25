@@ -268,7 +268,7 @@ class AttendanceManager:
         qr_ttl = (
             int(rotation_seconds)
             if rotation_seconds is not None and int(rotation_seconds) >= 3
-            else self.config.qr_rotation_seconds
+            else 0
         )
 
         now_ts = int(time.time())

@@ -261,8 +261,17 @@ function renderLiveAttendanceTab(container, ctx) {
         if (stopSetupMap) { stopSetupMap(); stopSetupMap = null; }
         mount(container, el('div', { class: 'card' }, el('span', { class: 'spinner' })));
         let sessions = [];
+        let defaultGeofenceRadius = 100;
+        let defaultEnforceGeofence = true;
         try {
-            sessions = await api.get('/api/attendance/sessions').then((r) => r.sessions);
+            const res = await api.get('/api/attendance/sessions');
+            sessions = res.sessions || [];
+            if (Number.isFinite(Number(res.default_geofence_radius_meters)) && Number(res.default_geofence_radius_meters) >= 10) {
+                defaultGeofenceRadius = Number(res.default_geofence_radius_meters);
+            }
+            if (typeof res.default_enforce_geofence === 'boolean') {
+                defaultEnforceGeofence = res.default_enforce_geofence;
+            }
         } catch (err) {
             toast(err.message, 'error');
         }
@@ -279,7 +288,7 @@ function renderLiveAttendanceTab(container, ctx) {
 
         let selectedLat = 32.104400;
         let selectedLng = 35.207800;
-        let selectedRadius = 100;
+        let selectedRadius = defaultGeofenceRadius;
 
         const lessonModeSelect = el(
             'select',
@@ -296,7 +305,7 @@ function renderLiveAttendanceTab(container, ctx) {
 
         const lessonNo = el('input', { type: 'number', min: 1, max: 99, value: suggestedNextNo, required: true, name: 'lesson_no' });
         const title = el('input', { type: 'text', maxlength: 80, placeholder: 'Optional, e.g. Design Patterns', name: 'title' });
-        const enforce = el('input', { type: 'checkbox', checked: true, name: 'enforce_geofence' });
+        const enforce = el('input', { type: 'checkbox', checked: defaultEnforceGeofence, name: 'enforce_geofence' });
         const detectGpsBtn = button('Use My Current Location', { cls: 'sm primary', iconName: 'wifi' });
         const presetGpsBtn = button('Ariel Campus preset', { cls: 'sm ghost' });
         const resetCooldownSetupBtn = buildResetCooldownsButton('sm');
@@ -309,8 +318,11 @@ function renderLiveAttendanceTab(container, ctx) {
             : null;
         const start = button('Start attendance session', { cls: 'primary lg block', type: 'submit', iconName: 'play' });
 
-        /* ----- Radius selector pills (30m / 50m / 100m) ----- */
+        /* ----- Radius selector pills (30m / 50m / 100m + custom .env default if different) ----- */
         const RADIUS_OPTIONS = [30, 50, 100];
+        const radiusPillValues = RADIUS_OPTIONS.includes(defaultGeofenceRadius)
+            ? RADIUS_OPTIONS
+            : [...RADIUS_OPTIONS, defaultGeofenceRadius].sort((a, b) => a - b);
         let mapInstance = null;
         let mapMarker = null;
         let mapCircle = null;
@@ -325,10 +337,10 @@ function renderLiveAttendanceTab(container, ctx) {
             mapCoordsCaption.textContent = `Selected classroom pin: ${selectedLat.toFixed(6)}, ${selectedLng.toFixed(6)} · Geofence radius: ${selectedRadius}m (click map or drag pin to move)`;
         };
 
-        const pillButtons = RADIUS_OPTIONS.map((r) => {
+        const pillButtons = radiusPillValues.map((r) => {
             const pill = el('button', {
                 type: 'button',
-                class: `radius-pill ${r === 100 ? 'active' : ''}`.trim(),
+                class: `radius-pill ${r === selectedRadius ? 'active' : ''}`.trim(),
                 'data-radius': String(r),
             }, `${r}m`);
             pill.addEventListener('click', () => setRadiusMeters(r));
@@ -336,7 +348,7 @@ function renderLiveAttendanceTab(container, ctx) {
         });
 
         const setRadiusMeters = (r) => {
-            selectedRadius = Math.max(30, Math.min(500, Number(r) || 100));
+            selectedRadius = Math.max(10, Math.min(5000, Number(r) || defaultGeofenceRadius));
             for (const pill of pillButtons) {
                 pill.classList.toggle('active', Number(pill.dataset.radius) === selectedRadius);
             }
@@ -365,6 +377,7 @@ function renderLiveAttendanceTab(container, ctx) {
             if (val === '__new__') {
                 lessonNo.value = String(suggestedNextNo);
                 title.value = '';
+                setRadiusMeters(defaultGeofenceRadius);
                 return;
             }
             const chosen = sessions.find((s) => s.lesson_id === val);

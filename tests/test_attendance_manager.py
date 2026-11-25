@@ -56,8 +56,6 @@ def attendance_env() -> tuple[AppConfig, FirebaseRepository, AttendanceManager]:
     config = AppConfig(
         use_mock_firebase=True,
         jwt_secret="checkpoint-3-5-attendance-geofence-secret-key-32-bytes",
-        qr_rotation_seconds=8,
-        qr_grace_seconds=7,
         device_cooldown_minutes=15,
         enforce_geofence_default=True,
         geofence_radius_meters=100,
@@ -397,7 +395,7 @@ def test_attendance_http_endpoints_gps_geofence_and_cooldown_flow() -> None:
     cfg = AppConfig(
         use_mock_firebase=True,
         jwt_secret="http-integration-attendance-secret-key-32-bytes",
-        lecturer_access_code="TA-ADMIN-2026",
+        geofence_radius_meters=50,
     )
     repo = FirebaseRepository(use_mock=True)
     repo.set(
@@ -420,7 +418,7 @@ def test_attendance_http_endpoints_gps_geofence_and_cooldown_flow() -> None:
     test_app = create_app(config=cfg, repository=repo)
     lec_client = TestClient(test_app)
 
-    # 1. Lecturer logs in with configured account and opens Lesson 1 with classroom GPS coordinates and 100m radius
+    # 1. Lecturer logs in with configured account and verifies default_geofence_radius_meters from AppConfig
     lec_client.post(
         "/api/auth/lecturer/login",
         json={
@@ -428,6 +426,11 @@ def test_attendance_http_endpoints_gps_geofence_and_cooldown_flow() -> None:
             "password": "12345",
         },
     )
+    sessions_list = lec_client.get("/api/attendance/sessions")
+    assert sessions_list.status_code == 200
+    assert sessions_list.json()["default_geofence_radius_meters"] == 50
+    assert sessions_list.json()["default_enforce_geofence"] is True
+
     start_res = lec_client.post(
         "/api/attendance/sessions",
         json={

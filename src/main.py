@@ -756,16 +756,25 @@ def create_app(
     async def list_attendance_sessions_endpoint(request: Request) -> dict[str, Any]:
         """
         Purpose:
-            Lecturer-protected listing of all attendance sessions stored in Firebase RTDB.
+            Lecturer-protected listing of all attendance sessions stored in Firebase RTDB,
+            along with runtime attendance defaults from `AppConfig` (`default_geofence_radius_meters`
+            and `default_enforce_geofence`) so the frontend initializes directly from `.env`.
         Inputs:
             request (Request): Incoming FastAPI request (requires Lecturer JWT).
         Outputs:
-            dict[str, Any]: Dictionary with `count` and `sessions`.
+            dict[str, Any]: Dictionary with `count`, `sessions`, `default_geofence_radius_meters`,
+            and `default_enforce_geofence`.
         """
         request.app.state.auth_service.require_lecturer_claims(request)
         mgr: AttendanceManager = request.app.state.attendance_manager
+        cfg: AppConfig = request.app.state.config
         sessions = mgr.list_sessions()
-        return {"count": len(sessions), "sessions": sessions}
+        return {
+            "count": len(sessions),
+            "sessions": sessions,
+            "default_geofence_radius_meters": int(cfg.geofence_radius_meters),
+            "default_enforce_geofence": bool(cfg.enforce_geofence_default),
+        }
 
     @fastapi_app.get(
         "/api/attendance/checkin-context", response_class=JSONResponse
