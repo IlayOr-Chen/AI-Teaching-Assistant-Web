@@ -10,36 +10,41 @@ services:
     startCommand: uvicorn src.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips="*"
     healthCheckPath: /api/health
     envVars:
+      # Firebase Realtime Database (upload serviceAccountKey.json as a Render Secret File)
       - key: FIREBASE_DB_URL
         value: https://ai-teaching-assistant-web-default-rtdb.firebaseio.com/
       - key: FIREBASE_CREDENTIALS_PATH
-        value: serviceAccountKey.json
+        value: /etc/secrets/serviceAccountKey.json
       - key: USE_MOCK_FIREBASE
         value: "false"
+
+      # Authentication & Fixed Demo Lecturer Account
       - key: JWT_SECRET
         generateValue: true
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: JWT_EXPIRATION_HOURS
+        value: "12"
       - key: LECTURER_EMAIL
         value: adminL@gmail.com
       - key: LECTURER_PASSWORD
         value: "12345"
       - key: LECTURER_NAME
         value: Course Lecturer
-      - key: LECTURER_ACCESS_CODE
-        value: TA-ADMIN-2026
-      - key: QR_ROTATION_SECONDS
-        value: "8"
-      - key: QR_GRACE_SECONDS
-        value: "7"
+
+      # Smart Attendance — Static Session QR & GPS Geofencing
       - key: DEVICE_COOLDOWN_MINUTES
         value: "15"
       - key: ENFORCE_GEOFENCE_DEFAULT
         value: "true"
       - key: GEOFENCE_RADIUS_METERS
         value: "100"
+
+      # Google Gemini AI (Pure BYOK — no server-side Gemini API key needed; users enter keys in the UI)
       - key: GEMINI_MODEL
         value: gemini-3.5-flash-lite
-      - key: GEMINI_API_KEY
-        sync: false
+
+      # Local YOLO Classroom Headcount
       - key: YOLO_MODEL_PATH
         value: yolov8n.pt
       - key: YOLO_CONFIDENCE_THRESHOLD
