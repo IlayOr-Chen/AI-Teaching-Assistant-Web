@@ -1,8 +1,9 @@
 /**
- * Purpose: Lecturer experience — login/register view and the dashboard (Overview + Live Attendance
- *          tabs with the animated rotating QR countdown ring, live check-in feed, same-network toggle).
+ * Purpose: Lecturer experience — restricted sign-in view and the dashboard (Overview, Live Attendance
+ *          with static session QR + Leaflet GPS geofence map, Roster & YOLO Headcount, Live Polls,
+ *          Comments, Video AI, and Homework Review tabs).
  * Inputs:  a root element and callbacks supplied by app.js.
- * Outputs: DOM rendered into the root. Later checkpoints append tabs in `buildLecturerTabs`.
+ * Outputs: DOM rendered into the root.
  */
 
 import { api } from './api.js';

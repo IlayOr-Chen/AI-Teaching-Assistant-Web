@@ -144,7 +144,7 @@ class StartAttendanceSessionRequest(BaseModel):
     """
     Purpose:
         Pydantic schema for starting or reopening a smart attendance session
-        configured with GPS Geofencing and rotating QR parameters.
+        configured with GPS Geofencing and static session QR parameters.
     Inputs:
         lesson_id (str), lesson_title (str), classroom_lat (float | None),
         classroom_lng (float | None), geofence_radius_meters (int | None),
@@ -392,8 +392,8 @@ def create_app(
     fastapi_app = FastAPI(
         title="Web-Based AI Teaching Assistant",
         description=(
-            "OOP/OOD Classroom Platform: Smart QR + YOLO Attendance, Live Polls, "
-            "Threaded Comments, Gemini MP4 Lecture Summarizer, and PDF Homework Reviewer."
+            "OOP/OOD Classroom Platform: Smart QR + GPS Geofencing + YOLO Attendance, Live Polls, "
+            "Threaded Comments, YouTube Lecture Video Summarizer, and Homework Reviewer."
         ),
         version=__version__,
     )
@@ -714,7 +714,7 @@ def create_app(
         """
         Purpose:
             Lecturer-protected endpoint to activate an attendance session with
-            classroom GPS geofencing coordinates, radius, and rotating QR settings.
+            classroom GPS geofencing coordinates, radius, and a static session QR token.
         Inputs:
             payload (StartAttendanceSessionRequest): Lesson ID, title, and GPS geofence settings.
             request (Request): Incoming FastAPI request.
@@ -778,13 +778,13 @@ def create_app(
         """
         Purpose:
             Public, QR-gated endpoint for the student mobile check-in page. It verifies the
-            scanned rotating token and, only then, returns the lesson title, GPS geofencing
-            requirements, and the list of roster names (`student_id` + `full_name`, no emails/groups)
+            scanned session QR token and, only then, returns the lesson title, GPS geofencing
+            requirements, and the list of roster names (`student_id` + `full_name`)
             for the searchable dropdown.
         Inputs:
             request (Request): Incoming FastAPI request.
             lesson_id (str): Lesson identifier from the QR link.
-            qr_token (str): Signed rotating QR token from the QR link.
+            qr_token (str): Static session QR token from the QR link.
         Outputs:
             dict[str, Any]: `lesson_id`, `lesson_title`, `enforce_geofence`,
             `geofence_radius_meters`, `has_classroom_coords`, and `students`.

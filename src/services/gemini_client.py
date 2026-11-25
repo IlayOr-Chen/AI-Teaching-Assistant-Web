@@ -391,7 +391,7 @@ class GeminiClient:
             Construct a `google.genai.types.Part` for a YouTube video URI.
             When `use_low_fps=True`, attaches `types.VideoMetadata(fps=0.1)` (1 frame every
             10 seconds — valid Gemini Developer API field) to keep token count low on long
-            lectures. Never sets `content_layers`.
+            lectures.
             When `use_low_fps=False`, builds a plain `types.Part.from_uri(file_uri=..., mime_type=...)`.
         Inputs:
             file_uri (str): Canonical YouTube URL (`https://www.youtube.com/watch?v=...`).
@@ -494,6 +494,15 @@ class GeminiClient:
         def _invoke_with_contents(
             target_model: str, contents: list[Any]
         ) -> dict[str, Any]:
+            """
+            Purpose:
+                Execute a single `generate_content` call against `target_model` and parse JSON.
+            Inputs:
+                target_model (str): Candidate Gemini model identifier.
+                contents (list[Any]): Prompt and optional media/URI parts.
+            Outputs:
+                dict[str, Any]: Parsed JSON dictionary from Gemini's text output.
+            """
             response = client.models.generate_content(
                 model=target_model,
                 contents=contents,
@@ -511,6 +520,14 @@ class GeminiClient:
             return parsed
 
         def _build_request_contents(use_low_fps: bool = True) -> list[Any]:
+            """
+            Purpose:
+                Assemble the `contents` list for text, binary document, or YouTube URI requests.
+            Inputs:
+                use_low_fps (bool): Whether to include `VideoMetadata(fps=0.1)` on YouTube URIs.
+            Outputs:
+                list[Any]: Payload list ready for `client.models.generate_content`.
+            """
             if file_uri and file_uri.strip():
                 uri_part = self._build_youtube_part(
                     file_uri=file_uri.strip(),
@@ -529,6 +546,15 @@ class GeminiClient:
         def _run_across_models_with_retry(
             use_low_fps: bool = True,
         ) -> tuple[dict[str, Any], str]:
+            """
+            Purpose:
+                Iterate over `candidate_models`, retrying once on transient 503/429 and falling
+                back across models on 503, 429, or 404 responses.
+            Inputs:
+                use_low_fps (bool): Passed through to `_build_request_contents`.
+            Outputs:
+                tuple[dict[str, Any], str]: `(parsed_json, actual_model_used)`.
+            """
             contents = _build_request_contents(use_low_fps=use_low_fps)
             last_exc: Exception | None = None
             seen_kinds: set[str] = set()

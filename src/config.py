@@ -20,7 +20,7 @@ class AppConfig:
     """
     Purpose:
         Immutable configuration value object holding Firebase RTDB, JWT auth,
-        smart attendance (rotating QR, GPS geofencing, 15-min cooldown), YOLO headcount,
+        smart attendance (static session QR, GPS geofencing, 15-min cooldown), YOLO headcount,
         and Gemini LLM parameters.
     Inputs:
         firebase_db_url (str): Target Firebase Realtime Database root URL.

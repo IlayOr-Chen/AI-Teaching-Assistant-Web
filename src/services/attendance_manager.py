@@ -644,7 +644,7 @@ class AttendanceManager:
         Inputs:
             lesson_id (str): Target lesson session ID.
             student_id (str): Selected student ID from the Firebase class roster.
-            qr_token (str): Short-lived rotating QR token.
+            qr_token (str): Static session QR token bound to the active lesson.
             student_lat (float | None): Student's GPS latitude from Browser Geolocation API.
             student_lng (float | None): Student's GPS longitude from Browser Geolocation API.
             device_cookie_value (str | None): Incoming `ta_device_id` signed cookie if present.
@@ -665,7 +665,7 @@ class AttendanceManager:
                 f"Attendance session '{clean_lesson_id}' is closed and no longer accepting check-ins."
             )
 
-        # Step 2: Verify rotating QR token signature, expiration, and lesson binding
+        # Step 2: Verify static session QR token validity and lesson binding
         self.verify_qr_token(qr_token, expected_lesson_id=clean_lesson_id)
 
         # Step 3: Resolve or mint signed device ID and enforce 15-minute device cooldown
