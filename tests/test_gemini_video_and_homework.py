@@ -108,19 +108,27 @@ def _test_gemini_transport(**kwargs: Any) -> dict[str, Any]:
                 "overall_rating": "Excellent",
             },
         }
-    if "relative_strengths" in prompt:
+    if "peer_standing" in prompt or "relative_strengths" in prompt:
         return {
-            "relative_strengths": [
+            "peer_standing": {
+                "tier": "Above Class Average",
+                "explanation": "Stronger OOP layering and test coverage than most peer submissions, with minor gaps in timeout edge cases.",
+            },
+            "missing_compared_to_peers": [
+                "Peers included negative timeout assertions for external HTTP calls that are missing here.",
+                "Several classmates documented explicit error frames in their sequence diagrams.",
+            ],
+            "strengths_vs_peers": [
                 "More thorough edge-case coverage than the cohort average.",
-                "Clean separation of OOP layers and docstrings.",
+                "Clean separation of OOP layers and Purpose/Inputs/Outputs docstrings.",
+            ],
+            "actionable_improvements": [
+                "Add mocked timeout pytest cases for external API calls.",
+                "Annotate error/rejection branches in the sequence diagrams.",
             ],
             "unique_ideas": [
                 "Included deterministic Haversine distance verification.",
                 "Added automated class-diagram parity assertions.",
-            ],
-            "common_gaps": [
-                "Expand negative timeout tests for external API calls.",
-                "Document sequence diagram error frames.",
             ],
         }
     return {
@@ -920,6 +928,12 @@ def test_homework_reviewer_multi_student_peer_comparison_and_deadline_expiry() -
     assert comp["is_first_submission_only"] is False
     assert comp["total_submissions"] == 2
     assert comp["peer_count"] == 1
+    assert isinstance(comp["peer_standing"], dict)
+    assert comp["peer_standing"]["tier"] == "Above Class Average"
+    assert len(comp["peer_standing"]["explanation"]) > 10
+    assert len(comp["missing_compared_to_peers"]) >= 1
+    assert len(comp["strengths_vs_peers"]) >= 1
+    assert len(comp["actionable_improvements"]) >= 1
     assert len(comp["relative_strengths"]) >= 1
     assert len(comp["unique_ideas"]) >= 1
     assert len(comp["common_gaps"]) >= 1

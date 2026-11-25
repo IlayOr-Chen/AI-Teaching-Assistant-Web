@@ -1,8 +1,8 @@
 /**
  * Purpose: Frontend UI module for Feature 4 (AI Lecture Video Summarizer — YouTube URL Only +
- *          Gemini VideoMetadata content_layers fast 45-90 min lecture analysis) and Feature 5
+ *          oEmbed title lookup + automatic 2-step transcript / low-FPS strategy) and Feature 5
  *          (Deep Homework Review & Peer Comparison — Multi-Format Files & Public Git Repo URLs +
- *          Gemini + Gated Release Rule).
+ *          BYOK Gemini + Gated Release Rule + Rich Peer Comparison).
  * Inputs:  DOM container and `{ user, role }` context.
  * Outputs: Interactive Video AI and Homework tabs.
  */
@@ -447,19 +447,58 @@ function renderReviewAndComparisonColumns(payload) {
         peerContent = [
             el('div', { class: 'banner info' }, [
                 el('span', { html: icon('info') }),
-                el('span', {}, comp.notice),
+                el('span', {}, comp.notice || 'Peer comparison will populate automatically once additional students submit.'),
             ]),
         ];
     } else {
+        const standing = comp.peer_standing && typeof comp.peer_standing === 'object'
+            ? comp.peer_standing
+            : (typeof comp.peer_standing === 'string' && comp.peer_standing.trim()
+                ? { tier: 'On Par with Peers', explanation: comp.peer_standing.trim() }
+                : null);
+        const standingTier = standing ? (standing.tier || 'On Par with Peers') : '';
+        const standingCls = /above/i.test(standingTier)
+            ? 'ok'
+            : (/needs/i.test(standingTier) ? 'warn' : 'info');
+        const missingList = Array.isArray(comp.missing_compared_to_peers) && comp.missing_compared_to_peers.length
+            ? comp.missing_compared_to_peers
+            : (Array.isArray(comp.common_gaps) ? comp.common_gaps : []);
+        const strengthsList = Array.isArray(comp.strengths_vs_peers) && comp.strengths_vs_peers.length
+            ? comp.strengths_vs_peers
+            : (Array.isArray(comp.relative_strengths) ? comp.relative_strengths : []);
+        const improvementsList = Array.isArray(comp.actionable_improvements) ? comp.actionable_improvements : [];
+        const uniqueList = Array.isArray(comp.unique_ideas) ? comp.unique_ideas : [];
+
         peerContent = [
             el('p', { class: 'faint' }, comp.notice || `Compared against ${comp.peer_count} peer submission(s).`),
-            el('h3', {}, 'Relative Strengths vs. Class Peers'),
-            el('ul', { class: 'bullet-list' }, (comp.relative_strengths || []).map((s) => el('li', {}, s))),
-            el('h3', {}, 'Unique Ideas & Distinctive Angles'),
-            el('ul', { class: 'bullet-list' }, (comp.unique_ideas || []).map((s) => el('li', {}, s))),
-            el('h3', {}, 'Common Cohort Gaps'),
-            el('ul', { class: 'bullet-list' }, (comp.common_gaps || []).map((s) => el('li', {}, s))),
-        ];
+            standing
+                ? el('div', { class: 'overview-box', style: 'padding:0.8rem 1rem' }, [
+                    el('div', { class: 'row' }, [
+                        el('strong', {}, 'Standing vs. Peers:'),
+                        el('span', { class: `chip ${standingCls}` }, standingTier),
+                    ]),
+                    standing.explanation
+                        ? el('p', { class: 'overview-paragraph', style: 'font-size:0.9rem' }, standing.explanation)
+                        : null,
+                ])
+                : null,
+            missingList.length ? el('h3', {}, 'Missing or Underdeveloped Compared to Peers') : null,
+            missingList.length
+                ? el('ul', { class: 'bullet-list' }, missingList.map((s) => el('li', { dir: 'auto' }, s)))
+                : null,
+            strengthsList.length ? el('h3', {}, 'Strengths vs. Class Peers') : null,
+            strengthsList.length
+                ? el('ul', { class: 'bullet-list' }, strengthsList.map((s) => el('li', { dir: 'auto' }, s)))
+                : null,
+            improvementsList.length ? el('h3', {}, 'Actionable Improvements to Close Gaps') : null,
+            improvementsList.length
+                ? el('ul', { class: 'bullet-list' }, improvementsList.map((s) => el('li', { dir: 'auto' }, s)))
+                : null,
+            uniqueList.length ? el('h3', {}, 'Unique Ideas & Distinctive Angles') : null,
+            uniqueList.length
+                ? el('ul', { class: 'bullet-list' }, uniqueList.map((s) => el('li', { dir: 'auto' }, s)))
+                : null,
+        ].filter(Boolean);
     }
 
     return el('div', { class: 'review-columns' }, [
@@ -662,6 +701,15 @@ export function renderHomeworkTab(container, ctx) {
             const studentPills = (a.submitted_students || []).map((stu) => {
                 const inspectBtn = button(`${stu.student_name} (${stu.filename})`, { cls: 'sm', iconName: 'file' });
                 inspectBtn.addEventListener('click', () => withLoading(inspectBtn, async () => {
+                    if (isReleased) {
+                        mount(detailHost, el('div', { class: 'processing-pulse', role: 'status', 'aria-live': 'polite' }, [
+                            el('span', { class: 'spinner' }),
+                            el('div', { class: 'stack', style: 'gap:0.15rem' }, [
+                                el('strong', {}, `Loading AI Review & Peer Comparison for ${stu.student_name}…`),
+                                el('span', { class: 'faint' }, 'Comparing against class submissions with Gemini…'),
+                            ]),
+                        ]));
+                    }
                     const revData = await api.get(
                         `/api/homework/assignments/${encodeURIComponent(a.assignment_id)}/review?student_id=${encodeURIComponent(stu.student_id)}`,
                     );
@@ -700,6 +748,39 @@ export function renderHomeworkTab(container, ctx) {
             );
             uploadFileBtn.disabled = isReleased;
 
+            const repoUrlInput = el('input', {
+                type: 'url',
+                placeholder: 'https://github.com/owner/repo (Public GitHub Repository URL)',
+                style: 'min-width:260px;flex:1',
+            });
+            repoUrlInput.disabled = isReleased;
+            const submitRepoBtn = button('Submit Public Git Repo URL', { cls: 'sm', iconName: 'sparkles' });
+            submitRepoBtn.disabled = isReleased;
+
+            const hwProcessingHost = el('div', { class: 'hidden' });
+
+            const setHwSubmissionBusy = (busy, sourceLabel = '') => {
+                uploadFileBtn.disabled = busy || isReleased;
+                submitRepoBtn.disabled = busy || isReleased;
+                repoUrlInput.disabled = busy || isReleased;
+                if (busy) {
+                    const activeModel = (studentModelInput ? studentModelInput.value : readStoredStudentModel()).trim() || DEFAULT_GEMINI_MODEL;
+                    mount(hwProcessingHost, el('div', { class: 'processing-pulse', role: 'status', 'aria-live': 'polite' }, [
+                        el('span', { class: 'spinner' }),
+                        el('div', { class: 'stack', style: 'gap:0.15rem' }, [
+                            el('strong', {}, 'Submitting & generating AI review with Gemini… This usually takes 5–15 seconds.'),
+                            el('span', { class: 'faint' }, sourceLabel
+                                ? `Analyzing "${sourceLabel}" using ${activeModel} — please keep this tab open until confirmation appears.`
+                                : `Analyzing your submission with ${activeModel}…`),
+                        ]),
+                    ]));
+                    hwProcessingHost.classList.remove('hidden');
+                } else {
+                    hwProcessingHost.classList.add('hidden');
+                    hwProcessingHost.replaceChildren();
+                }
+            };
+
             const stuIdParam = ctx.user?.student_id || '';
             const stuNameParam = ctx.user?.full_name || '';
 
@@ -714,25 +795,21 @@ export function renderHomeworkTab(container, ctx) {
                 if (stuNameParam) queryParts.push(`student_name=${encodeURIComponent(stuNameParam)}`);
                 const qs = queryParts.length ? `?${queryParts.join('&')}` : '';
                 withLoading(uploadFileBtn, async () => {
-                    await api.upload(
-                        `/api/homework/assignments/${encodeURIComponent(a.assignment_id)}/submit${qs}`,
-                        form,
-                        getStudentByokHeaders(),
-                    );
-                    toast(`Homework file "${file.name}" submitted!`, 'success');
-                    await loadAssignments();
+                    setHwSubmissionBusy(true, file.name);
+                    try {
+                        await api.upload(
+                            `/api/homework/assignments/${encodeURIComponent(a.assignment_id)}/submit${qs}`,
+                            form,
+                            getStudentByokHeaders(),
+                        );
+                        toast(`Homework file "${file.name}" submitted!`, 'success');
+                        await loadAssignments();
+                    } finally {
+                        setHwSubmissionBusy(false);
+                    }
                 });
                 fileInput.value = '';
             });
-
-            const repoUrlInput = el('input', {
-                type: 'url',
-                placeholder: 'https://github.com/owner/repo (Public GitHub Repository URL)',
-                style: 'min-width:260px;flex:1',
-            });
-            repoUrlInput.disabled = isReleased;
-            const submitRepoBtn = button('Submit Public Git Repo URL', { cls: 'sm', iconName: 'sparkles' });
-            submitRepoBtn.disabled = isReleased;
 
             submitRepoBtn.addEventListener('click', () => {
                 const urlVal = repoUrlInput.value.trim();
@@ -741,23 +818,37 @@ export function renderHomeworkTab(container, ctx) {
                     return;
                 }
                 withLoading(submitRepoBtn, async () => {
-                    await api.post(
-                        `/api/homework/assignments/${encodeURIComponent(a.assignment_id)}/submit-repo`,
-                        {
-                            repo_url: urlVal,
-                            student_id: stuIdParam || undefined,
-                            student_name: stuNameParam || undefined,
-                        },
-                        getStudentByokHeaders(),
-                    );
-                    repoUrlInput.value = '';
-                    toast('Public Git repository submitted and analyzed!', 'success');
-                    await loadAssignments();
+                    setHwSubmissionBusy(true, urlVal);
+                    try {
+                        await api.post(
+                            `/api/homework/assignments/${encodeURIComponent(a.assignment_id)}/submit-repo`,
+                            {
+                                repo_url: urlVal,
+                                student_id: stuIdParam || undefined,
+                                student_name: stuNameParam || undefined,
+                            },
+                            getStudentByokHeaders(),
+                        );
+                        repoUrlInput.value = '';
+                        toast('Public Git repository submitted and analyzed!', 'success');
+                        await loadAssignments();
+                    } finally {
+                        setHwSubmissionBusy(false);
+                    }
                 });
             });
 
             const loadMyReview = async () => {
                 if (!a.viewer_has_submitted) return;
+                if (isReleased) {
+                    mount(detailHost, el('div', { class: 'processing-pulse', role: 'status', 'aria-live': 'polite' }, [
+                        el('span', { class: 'spinner' }),
+                        el('div', { class: 'stack', style: 'gap:0.15rem' }, [
+                            el('strong', {}, 'Loading AI Review & Peer Comparison…'),
+                            el('span', { class: 'faint' }, 'Comparing your submission against class peers with Gemini…'),
+                        ]),
+                    ]));
+                }
                 try {
                     const revQuery = stuIdParam ? `?student_id=${encodeURIComponent(stuIdParam)}` : '';
                     const revData = await api.get(
@@ -766,6 +857,7 @@ export function renderHomeworkTab(container, ctx) {
                     );
                     mount(detailHost, renderReviewAndComparisonColumns(revData));
                 } catch (err) {
+                    detailHost.replaceChildren();
                     toast(err.message, 'error');
                 }
             };
@@ -780,6 +872,7 @@ export function renderHomeworkTab(container, ctx) {
                         submitRepoBtn,
                     ])
                     : null,
+                hwProcessingHost,
                 el('div', { class: 'row' }, [
                     a.viewer_has_submitted
                         ? el('span', { class: 'chip ok' }, [el('span', { html: icon('check') }), 'Homework Submitted'])

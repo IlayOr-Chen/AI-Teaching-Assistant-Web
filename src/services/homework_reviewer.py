@@ -590,6 +590,10 @@ class HomeworkReviewer:
                 "peer_count": 0,
                 "is_first_submission_only": True,
                 "notice": FIRST_SUBMISSION_NOTICE,
+                "peer_standing": None,
+                "missing_compared_to_peers": [],
+                "strengths_vs_peers": [],
+                "actionable_improvements": [],
                 "relative_strengths": [],
                 "unique_ideas": [],
                 "common_gaps": [],
@@ -613,11 +617,16 @@ class HomeworkReviewer:
         )
         prompt = (
             "You are a university Software Engineering AI Teaching Assistant comparing a student's "
-            f"homework submission against {peer_count} peer submissions for '{assignment.get('title')}'. "
-            "Analyze the actual code, architecture, and text content below and return ONLY a JSON object with keys:\n"
-            '- "relative_strengths": list of 2-3 strings comparing this submission favorably against peers\n'
-            '- "unique_ideas": list of 2 strings highlighting distinctive angles, design choices, or implementations in this submission\n'
-            '- "common_gaps": list of 2 strings identifying gaps or improvement areas shared across the cohort.\n'
+            f"homework submission against {peer_count} peer submission(s) for '{assignment.get('title')}'. "
+            "Analyze the actual code, architecture, tests, diagrams, and text content below. Be concrete, "
+            "constructive, and specific — never invent generic filler. Return ONLY a valid JSON object with keys:\n"
+            '- "peer_standing": object with keys "tier" ("Above Class Average" | "On Par with Peers" | "Needs Improvement") '
+            'and "explanation" (1-2 concise sentences explaining why this submission stands where it does compared to peers)\n'
+            '- "missing_compared_to_peers": list of 2-4 concrete strings naming specific elements, requirements, edge cases, '
+            "tests, or explanations that OTHER students included which are missing or underdeveloped in this submission\n"
+            '- "strengths_vs_peers": list of 2-3 concrete strings explaining what this submission did as well as or better than peers\n'
+            '- "actionable_improvements": list of 2-3 practical next steps this student should take to close the gaps vs. peers\n'
+            '- "unique_ideas": list of 1-2 strings highlighting distinctive angles, design choices, or implementations in this submission.\n'
             f"Target student submission ({target_submission.get('filename')}, {target_words} words):\n"
             f"{str(target_submission.get('extracted_text', ''))[:4000]}\n\n"
             f"Peer excerpts:\n{peer_summaries}"
@@ -631,14 +640,83 @@ class HomeworkReviewer:
             missing_key_error=MISSING_STUDENT_GEMINI_KEY_ERROR,
         )
 
+        raw_standing = generated.get("peer_standing")
+        if isinstance(raw_standing, dict):
+            standing_tier = str(
+                raw_standing.get("tier")
+                or raw_standing.get("rating")
+                or "On Par with Peers"
+            ).strip()
+            standing_expl = str(
+                raw_standing.get("explanation")
+                or raw_standing.get("summary")
+                or ""
+            ).strip()
+            peer_standing = {
+                "tier": standing_tier or "On Par with Peers",
+                "explanation": standing_expl,
+            }
+        elif isinstance(raw_standing, str) and raw_standing.strip():
+            peer_standing = {
+                "tier": "On Par with Peers",
+                "explanation": raw_standing.strip(),
+            }
+        else:
+            peer_standing = {
+                "tier": "On Par with Peers",
+                "explanation": f"Evaluated alongside {peer_count} peer submission(s) in the class.",
+            }
+
+        strengths_vs_peers = [
+            str(s).strip()
+            for s in (
+                generated.get("strengths_vs_peers")
+                or generated.get("relative_strengths")
+                or []
+            )
+            if str(s).strip()
+        ]
+        missing_vs_peers = [
+            str(m).strip()
+            for m in (
+                generated.get("missing_compared_to_peers")
+                or generated.get("common_gaps")
+                or []
+            )
+            if str(m).strip()
+        ]
+        actionable_improvements = [
+            str(a).strip()
+            for a in (
+                generated.get("actionable_improvements")
+                or generated.get("common_gaps")
+                or []
+            )
+            if str(a).strip()
+        ]
+        unique_ideas = [
+            str(u).strip()
+            for u in (generated.get("unique_ideas") or [])
+            if str(u).strip()
+        ]
+        common_gaps = [
+            str(g).strip()
+            for g in (generated.get("common_gaps") or missing_vs_peers)
+            if str(g).strip()
+        ]
+
         return {
             "total_submissions": total_subs,
             "peer_count": peer_count,
             "is_first_submission_only": False,
             "notice": f"Compared against {peer_count} other student submission(s) in the class.",
-            "relative_strengths": list(generated.get("relative_strengths", [])),
-            "unique_ideas": list(generated.get("unique_ideas", [])),
-            "common_gaps": list(generated.get("common_gaps", [])),
+            "peer_standing": peer_standing,
+            "missing_compared_to_peers": missing_vs_peers,
+            "strengths_vs_peers": strengths_vs_peers,
+            "actionable_improvements": actionable_improvements,
+            "relative_strengths": strengths_vs_peers,
+            "unique_ideas": unique_ideas,
+            "common_gaps": common_gaps,
         }
 
     def submit_homework_pdf(
