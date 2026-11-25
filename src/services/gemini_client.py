@@ -2,12 +2,14 @@
 Purpose:
     Implements `GeminiClient` encapsulating Google Gemini API configuration
     (BYOK per-user API key & configurable model ID defaulting to `gemini-3.5-flash-lite`,
-    with quick presets `gemini-3.5-flash-lite`, `gemini-3.5-flash`, `gemini-2.5-flash`,
-    while allowing any custom model ID) and real multimodal inference via the official
-    `google-genai` SDK — supporting standard Developer API keys (`AIza...` and `AQ....`),
-    direct YouTube URI analysis (`types.Part` with `VideoMetadata` `content_layers`
-    `["TRANSCRIPT"]` / `["AUDIO"]` or `fps=0.2` for fast 45-90 min lectures), and
-    automatic retry + model fallback on transient `503 UNAVAILABLE` / `429 RESOURCE_EXHAUSTED`.
+    with verified presets `gemini-3.8-flash`, `gemini-3.5-flash-lite`, and `gemini-3.5-flash`,
+    while allowing any custom free-text model ID) and real multimodal inference via the
+    official `google-genai` SDK — supporting standard Developer API keys (`AIza...` and
+    `AQ....`), YouTube video URI analysis (`types.Part` with `VideoMetadata(fps=0.1)` and
+    automatic `Part.from_uri` fallback if `video_metadata` returns HTTP 400), and
+    automatic retry + model fallback across `[selected_model, "gemini-3.8-flash",
+    "gemini-3.5-flash", "gemini-3.5-flash-lite"]` on transient `503 UNAVAILABLE`,
+    `429 RESOURCE_EXHAUSTED`, or `404 NOT_FOUND` errors.
 Inputs:
     `FirebaseRepository` persistence instance, `AppConfig` defaults, per-request BYOK
     key/model overrides (`X-Gemini-Api-Key`, `X-Gemini-Model`), and optional custom
@@ -33,13 +35,13 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 VALID_GEMINI_PRESETS = (
+    "gemini-3.8-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.5-flash",
-    "gemini-2.5-flash",
 )
 FALLBACK_MODEL_PRIORITY = (
+    "gemini-3.8-flash",
     "gemini-3.5-flash",
-    "gemini-2.5-flash",
     "gemini-3.5-flash-lite",
 )
 
@@ -50,19 +52,41 @@ PLACEHOLDER_KEYS = {
     "null",
 }
 
-YOUTUBE_VIDEO_MODES = ("transcript", "audio", "full_video")
+GEMINI_503_HIGH_DEMAND_MESSAGE = (
+    "Google's Gemini servers are currently experiencing temporary high demand (503). "
+    "Please retry in a few seconds or switch models (e.g., gemini-3.8-flash, "
+    "gemini-3.5-flash-lite, or gemini-3.5-flash)."
+)
+
+GEMINI_429_RATE_LIMIT_MESSAGE = (
+    "Gemini API rate limit / quota reached (429) for this API key. "
+    "Please wait a moment or try switching models."
+)
 
 
 class GeminiHighDemandError(RuntimeError):
     """
     Purpose:
         Specialized runtime exception raised when all candidate Gemini models return
-        transient `503 UNAVAILABLE` or `429 RESOURCE_EXHAUSTED` high-demand errors
-        after automatic retry and fallback attempts.
+        transient `503 UNAVAILABLE` high-demand errors after automatic retry and
+        fallback attempts.
     Inputs:
         message (str): Human-readable high-demand error detail for the HTTP 503 response.
     Outputs:
         `GeminiHighDemandError` instance.
+    """
+
+
+class GeminiRateLimitError(RuntimeError):
+    """
+    Purpose:
+        Specialized runtime exception raised when all candidate Gemini models return
+        `429 RESOURCE_EXHAUSTED` rate-limit / quota errors after automatic retry and
+        fallback attempts.
+    Inputs:
+        message (str): Human-readable rate-limit error detail for the HTTP 429 response.
+    Outputs:
+        `GeminiRateLimitError` instance.
     """
 
 
@@ -74,9 +98,10 @@ class GeminiClient:
         `X-Gemini-Model`) for students as well as Lecturer credentials persisted in
         Firebase RTDB (`/settings/gemini`), initializes the official `google-genai`
         SDK using the standard Gemini Developer API for all key types (`AIza...` and
-        `AQ....`), supports fast YouTube lecture analysis via `VideoMetadata(content_layers=...)`
-        with automatic `TRANSCRIPT -> AUDIO` fallback, and retries/falls back across
-        Gemini models when transient `503 UNAVAILABLE` or `429` spikes occur.
+        `AQ....`), supports direct YouTube lecture analysis via `VideoMetadata(fps=0.1)`
+        with automatic fallback to plain `Part.from_uri` on 400 errors, and retries/falls
+        back across `[selected_model, "gemini-3.8-flash", "gemini-3.5-flash",
+        "gemini-3.5-flash-lite"]` whenever a model returns `503`, `429`, or `404`.
     Inputs:
         repository (FirebaseRepository): Firebase RTDB persistence layer.
         config (AppConfig): Application configuration providing default key and model.
@@ -322,75 +347,70 @@ class GeminiClient:
             return None
 
     @staticmethod
-    def _is_transient_overload_error(exc: Exception) -> bool:
+    def _classify_fallback_error(exc: Exception) -> str | None:
         """
         Purpose:
-            Detect whether a Gemini SDK exception represents a transient high-demand
-            or rate-limit condition (`503 UNAVAILABLE`, `429 RESOURCE_EXHAUSTED`,
-            `overloaded`, `high demand`, `temporarily unavailable`).
+            Classify whether a Gemini SDK exception should trigger fallback to the next
+            candidate model in `FALLBACK_MODEL_PRIORITY`:
+            - `"503"`: transient high-demand / unavailable (`503 UNAVAILABLE`, `OVERLOADED`)
+            - `"429"`: rate-limit / quota exhausted (`429 RESOURCE_EXHAUSTED`, `QUOTA`)
+            - `"404"`: model unavailable / deprecated (`404 NOT_FOUND`, `NO LONGER AVAILABLE`)
+            - `None`: non-fallback error (e.g., `400 INVALID_ARGUMENT`, `403 PERMISSION_DENIED`)
         Inputs:
             exc (Exception): Raised exception from `client.models.generate_content`.
         Outputs:
-            bool: True if the error is a transient 503/429 overload condition.
+            str | None: `"503"`, `"429"`, `"404"`, or `None`.
         """
         code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
-        if code in (503, 429):
-            return True
+        if code == 503:
+            return "503"
+        if code == 429:
+            return "429"
+        if code == 404:
+            return "404"
+
         text = str(exc).upper()
         if "400" in text or "INVALID_ARGUMENT" in text:
-            return False
-        transient_markers = (
-            "503",
-            "UNAVAILABLE",
-            "429",
-            "RESOURCE_EXHAUSTED",
-            "HIGH DEMAND",
-            "OVERLOADED",
-        )
-        return any(marker in text for marker in transient_markers)
+            return None
+        if any(k in text for k in ("404", "NOT_FOUND", "NO LONGER AVAILABLE", "IS NOT FOUND")):
+            return "404"
+        if any(k in text for k in ("429", "RESOURCE_EXHAUSTED", "RATE LIMIT", "QUOTA")):
+            return "429"
+        if any(k in text for k in ("503", "UNAVAILABLE", "HIGH DEMAND", "OVERLOADED")):
+            return "503"
+        return None
 
     @staticmethod
     def _build_youtube_part(
         file_uri: str,
-        mime_type: str,
-        video_mode: str,
-    ) -> tuple[Any, str]:
+        mime_type: str = "video/mp4",
+        use_low_fps: bool = True,
+    ) -> Any:
         """
         Purpose:
-            Construct a `google.genai.types.Part` for a YouTube video URI configured with
-            `types.VideoMetadata` according to `video_mode`:
-            - `"transcript"` (default): `VideoMetadata(content_layers=["TRANSCRIPT"])`
-            - `"audio"`: `VideoMetadata(content_layers=["AUDIO"])`
-            - `"full_video"`: `VideoMetadata(fps=0.2)`
+            Construct a `google.genai.types.Part` for a YouTube video URI.
+            When `use_low_fps=True`, attaches `types.VideoMetadata(fps=0.1)` (1 frame every
+            10 seconds — valid Gemini Developer API field) to keep token count low on long
+            lectures. Never sets `content_layers`.
+            When `use_low_fps=False`, builds a plain `types.Part.from_uri(file_uri=..., mime_type=...)`.
         Inputs:
             file_uri (str): Canonical YouTube URL (`https://www.youtube.com/watch?v=...`).
             mime_type (str): Video MIME type (`"video/mp4"`).
-            video_mode (str): Selected mode (`"transcript"`, `"audio"`, or `"full_video"`).
+            use_low_fps (bool): Whether to include `VideoMetadata(fps=0.1)`.
         Outputs:
-            tuple[Any, str]: `(types.Part, normalized_mode)`.
+            Any: Configured `google.genai.types.Part` instance.
         """
         from google.genai import types
 
-        clean_mode = (video_mode or "transcript").strip().lower()
-        if clean_mode not in YOUTUBE_VIDEO_MODES:
-            clean_mode = "transcript"
-
-        file_data = types.FileData(file_uri=file_uri, mime_type=mime_type or "video/mp4")
-        try:
-            if clean_mode == "transcript":
-                meta = types.VideoMetadata(content_layers=["TRANSCRIPT"])
-            elif clean_mode == "audio":
-                meta = types.VideoMetadata(content_layers=["AUDIO"])
-            else:
-                meta = types.VideoMetadata(fps=0.2)
-            return types.Part(file_data=file_data, video_metadata=meta), clean_mode
-        except Exception:
-            return (
-                types.Part.from_uri(
-                    file_uri=file_uri, mime_type=mime_type or "video/mp4"
-                ),
-                clean_mode,
-            )
+        clean_mime = mime_type or "video/mp4"
+        if use_low_fps:
+            try:
+                file_data = types.FileData(file_uri=file_uri, mime_type=clean_mime)
+                meta = types.VideoMetadata(fps=0.1)
+                return types.Part(file_data=file_data, video_metadata=meta)
+            except Exception:
+                pass
+        return types.Part.from_uri(file_uri=file_uri, mime_type=clean_mime)
 
     def generate_structured_json(
         self,
@@ -399,7 +419,6 @@ class GeminiClient:
         media_bytes: bytes | None = None,
         mime_type: str | None = None,
         file_uri: str | None = None,
-        video_mode: str = "transcript",
         api_key_override: str | None = None,
         model_id_override: str | None = None,
         allow_stored_key: bool = True,
@@ -409,16 +428,16 @@ class GeminiClient:
         Purpose:
             Execute a structured JSON generation request against the real Google Gemini API
             (or custom test transport in `pytest`).
-            - For YouTube URLs (`file_uri`): uses `VideoMetadata(content_layers=["TRANSCRIPT"])`
-              in `"transcript"` mode (falling back automatically to `content_layers=["AUDIO"]`
-              if the video has no transcript or `TRANSCRIPT` fails for a non-overload reason),
-              `content_layers=["AUDIO"]` in `"audio"` mode, or `VideoMetadata(fps=0.2)` in
-              `"full_video"` mode.
-            - Automatic 503/429 Retry & Model Fallback: if the selected model returns
-              `503 UNAVAILABLE` or `429 RESOURCE_EXHAUSTED`, retries once after ~1.5s and then
-              cycles through `[selected_model, "gemini-3.5-flash", "gemini-2.5-flash",
-              "gemini-3.5-flash-lite"]` (deduplicated). If all candidate models are overloaded,
-              raises `GeminiHighDemandError` (mapped to HTTP 503).
+            - For YouTube URLs (`file_uri`): passes `types.Part` with `VideoMetadata(fps=0.1)`
+              first, and if the API returns a `400` on `video_metadata`, retries once with
+              plain `types.Part.from_uri(file_uri=..., mime_type="video/mp4")`.
+            - Automatic 503/429/404 Retry & Model Fallback: if a candidate model returns
+              `503 UNAVAILABLE`, `429 RESOURCE_EXHAUSTED`, or `404 NOT_FOUND`, logs it and
+              cycles through `[selected_model, "gemini-3.8-flash", "gemini-3.5-flash",
+              "gemini-3.5-flash-lite"]` (deduplicated; retries primary once on 503/429 before
+              moving on). If all candidate models are overloaded or rate-limited, raises
+              `GeminiHighDemandError` (HTTP 503) or `GeminiRateLimitError` (HTTP 429) with a
+              clear user-facing message.
             - Never returns silent fake/hardcoded fallback content in production.
         Inputs:
             prompt (str): Structured instruction prompt requesting JSON output.
@@ -426,24 +445,18 @@ class GeminiClient:
             media_bytes (bytes | None): Optional binary payload (PDF/document bytes).
             mime_type (str | None): Optional MIME type (`"video/mp4"`, `"application/pdf"`, etc.).
             file_uri (str | None): Optional public YouTube URL.
-            video_mode (str): YouTube analysis mode (`"transcript"`, `"audio"`, `"full_video"`).
             api_key_override (str | None): Optional BYOK API key header override.
             model_id_override (str | None): Optional BYOK model ID header override.
             allow_stored_key (bool): False for student BYOK mode so Lecturer/env keys are never used.
             missing_key_error (str | None): Custom error message when API key is missing.
         Outputs:
-            dict[str, Any]: Structured result dictionary enriched with `model_used`, `provider`,
-            and `video_mode_used` (when `file_uri` is provided).
+            dict[str, Any]: Structured result dictionary enriched with `model_used` and `provider`.
         """
         api_key, primary_model_id = self.resolve_credentials(
             api_key_override=api_key_override,
             model_id_override=model_id_override,
             allow_stored_key=allow_stored_key,
         )
-
-        clean_mode = (video_mode or "transcript").strip().lower()
-        if clean_mode not in YOUTUBE_VIDEO_MODES:
-            clean_mode = "transcript"
 
         if self._transport is not None:
             result = self._transport(
@@ -454,14 +467,11 @@ class GeminiClient:
                 mime_type=mime_type,
                 file_uri=file_uri,
             )
-            out = {
+            return {
                 **result,
                 "model_used": primary_model_id,
                 "provider": "custom_transport",
             }
-            if file_uri:
-                out["video_mode_used"] = clean_mode
-            return out
 
         if not api_key:
             msg = missing_key_error or (
@@ -500,30 +510,30 @@ class GeminiClient:
                 )
             return parsed
 
-        def _build_request_contents(active_video_mode: str) -> tuple[list[Any], str]:
+        def _build_request_contents(use_low_fps: bool = True) -> list[Any]:
             if file_uri and file_uri.strip():
-                uri_part, used_mode = self._build_youtube_part(
+                uri_part = self._build_youtube_part(
                     file_uri=file_uri.strip(),
                     mime_type=mime_type or "video/mp4",
-                    video_mode=active_video_mode,
+                    use_low_fps=use_low_fps,
                 )
-                return [uri_part, prompt], used_mode
+                return [uri_part, prompt]
             contents: list[Any] = []
             if media_bytes and mime_type:
                 contents.append(
                     types.Part.from_bytes(data=media_bytes, mime_type=mime_type)
                 )
             contents.append(prompt)
-            return contents, active_video_mode
+            return contents
 
         def _run_across_models_with_retry(
-            active_video_mode: str,
-        ) -> tuple[dict[str, Any], str, str]:
-            contents, used_mode = _build_request_contents(active_video_mode)
-            last_overload_exc: Exception | None = None
+            use_low_fps: bool = True,
+        ) -> tuple[dict[str, Any], str]:
+            contents = _build_request_contents(use_low_fps=use_low_fps)
+            last_exc: Exception | None = None
+            seen_kinds: set[str] = set()
 
             for model_idx, candidate_model in enumerate(candidate_models):
-                # For the primary selected model, retry once after ~1.5s before moving to fallbacks
                 max_attempts = 2 if model_idx == 0 else 1
                 for attempt in range(max_attempts):
                     try:
@@ -535,74 +545,75 @@ class GeminiClient:
                                 attempt + 1,
                                 model_idx,
                             )
-                        return parsed, candidate_model, used_mode
+                        return parsed, candidate_model
                     except Exception as exc:
-                        if self._is_transient_overload_error(exc):
-                            last_overload_exc = exc
+                        kind = self._classify_fallback_error(exc)
+                        if kind is not None:
+                            last_exc = exc
+                            seen_kinds.add(kind)
                             logger.warning(
-                                "Gemini model '%s' returned transient 503/429 overload (attempt %d/%d): %s",
+                                "Gemini model '%s' returned %s error (attempt %d/%d): %s",
                                 candidate_model,
+                                kind,
                                 attempt + 1,
                                 max_attempts,
                                 exc,
                             )
+                            # On 404 (model deprecated/not found), skip straight to next model without retrying
+                            if kind == "404":
+                                break
                             if attempt + 1 < max_attempts:
                                 time.sleep(1.5)
                                 continue
-                            # Move to next fallback model in candidate_models
                             break
                         raise
 
-            logger.error(
-                "All candidate Gemini models (%s) returned 503/429 high-demand errors: %s",
-                ", ".join(candidate_models),
-                last_overload_exc,
-            )
-            raise GeminiHighDemandError(
-                "Gemini models are temporarily experiencing high demand (503). Please retry in a few seconds."
-            ) from last_overload_exc
+            if "503" in seen_kinds:
+                logger.error(
+                    "All candidate Gemini models (%s) failed (last error: %s)",
+                    ", ".join(candidate_models),
+                    last_exc,
+                )
+                raise GeminiHighDemandError(GEMINI_503_HIGH_DEMAND_MESSAGE) from last_exc
+            if "429" in seen_kinds:
+                logger.error(
+                    "All candidate Gemini models (%s) hit 429 rate limits (last error: %s)",
+                    ", ".join(candidate_models),
+                    last_exc,
+                )
+                raise GeminiRateLimitError(GEMINI_429_RATE_LIMIT_MESSAGE) from last_exc
+
+            raise RuntimeError(
+                f"All candidate Gemini models ({', '.join(candidate_models)}) failed: {last_exc}"
+            ) from last_exc
 
         try:
-            if file_uri and file_uri.strip() and clean_mode == "transcript":
+            if file_uri and file_uri.strip():
                 try:
-                    parsed, used_model, used_mode = _run_across_models_with_retry(
-                        "transcript"
-                    )
-                except GeminiHighDemandError:
+                    parsed, used_model = _run_across_models_with_retry(use_low_fps=True)
+                except (GeminiHighDemandError, GeminiRateLimitError):
                     raise
-                except Exception as transcript_exc:
-                    logger.warning(
-                        "YouTube TRANSCRIPT layer unavailable or failed (%s); falling back automatically to AUDIO layer.",
-                        transcript_exc,
-                    )
-                    try:
-                        parsed, used_model, used_mode = _run_across_models_with_retry(
-                            "audio"
-                        )
-                    except GeminiHighDemandError:
-                        raise
-                    except Exception as audio_exc:
+                except Exception as meta_exc:
+                    exc_text = str(meta_exc).upper()
+                    if "400" in exc_text or "INVALID_ARGUMENT" in exc_text or "VIDEO_METADATA" in exc_text:
                         logger.warning(
-                            "YouTube AUDIO layer unavailable or failed (%s); falling back automatically to Low FPS (0.2) video.",
-                            audio_exc,
+                            "Gemini rejected VideoMetadata(fps=0.1) (%s); retrying with plain Part.from_uri.",
+                            meta_exc,
                         )
-                        parsed, used_model, used_mode = _run_across_models_with_retry(
-                            "full_video"
+                        parsed, used_model = _run_across_models_with_retry(
+                            use_low_fps=False
                         )
+                    else:
+                        raise
             else:
-                parsed, used_model, used_mode = _run_across_models_with_retry(
-                    clean_mode
-                )
+                parsed, used_model = _run_across_models_with_retry(use_low_fps=False)
 
-            out: dict[str, Any] = {
+            return {
                 **parsed,
                 "model_used": used_model,
                 "provider": "gemini_live",
             }
-            if file_uri and file_uri.strip():
-                out["video_mode_used"] = used_mode
-            return out
-        except GeminiHighDemandError:
+        except (GeminiHighDemandError, GeminiRateLimitError):
             raise
         except RuntimeError:
             raise

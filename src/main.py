@@ -47,7 +47,11 @@ from src.services.auth_service import (
     AuthService,
 )
 from src.services.comment_service import CommentService
-from src.services.gemini_client import GeminiClient, GeminiHighDemandError
+from src.services.gemini_client import (
+    GeminiClient,
+    GeminiHighDemandError,
+    GeminiRateLimitError,
+)
 from src.services.homework_reviewer import HomeworkReviewer
 from src.services.photo_head_counter import PhotoHeadCounter
 from src.services.poll_service import PollService
@@ -335,7 +339,7 @@ class SummarizeYoutubeVideoRequest(BaseModel):
     Purpose:
         Pydantic schema for summarizing a public YouTube lecture video directly via Gemini.
     Inputs:
-        youtube_url (str), lesson_tag (str), lecturer_notes (str), video_mode (str).
+        youtube_url (str), lesson_tag (str), lecturer_notes (str).
     Outputs:
         Validated `SummarizeYoutubeVideoRequest` instance.
     """
@@ -343,7 +347,6 @@ class SummarizeYoutubeVideoRequest(BaseModel):
     youtube_url: str
     lesson_tag: str = "Lesson 1"
     lecturer_notes: str = ""
-    video_mode: str = "transcript"
 
 
 def create_app(
@@ -1564,12 +1567,12 @@ def create_app(
         """
         Purpose:
             Lecturer-protected endpoint for Feature 4 (AI Lecture Video Summary — YouTube Only).
-            Canonicalizes the public YouTube video URL, passes it directly to the Gemini API
-            with `VideoMetadata(content_layers=...)` (`"transcript"` default, `"audio"`, or
-            `"full_video"`), and persists the rich structured academic summary under
-            `/video_summaries`.
+            Canonicalizes the public YouTube video URL, fetches the real title via oEmbed,
+            runs the automatic 2-step fast strategy (`youtube-transcript-api` -> Gemini text
+            analysis, or fallback to direct YouTube URI with `VideoMetadata(fps=0.1)`), and
+            persists the rich structured academic summary under `/video_summaries`.
         Inputs:
-            payload (SummarizeYoutubeVideoRequest): Public YouTube URL, lesson tag, notes, and video_mode.
+            payload (SummarizeYoutubeVideoRequest): Public YouTube URL, lesson tag, and notes.
             request (Request): Incoming FastAPI request.
         Outputs:
             dict[str, Any]: Structured lecture video summary record.
@@ -1586,13 +1589,16 @@ def create_app(
                 youtube_url=payload.youtube_url,
                 lesson_tag=payload.lesson_tag,
                 lecturer_notes=payload.lecturer_notes,
-                video_mode=payload.video_mode,
                 gemini_api_key=header_api_key,
                 gemini_model_id=header_model,
             )
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+        except GeminiRateLimitError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)
             ) from exc
         except GeminiHighDemandError as exc:
             raise HTTPException(
@@ -1803,6 +1809,10 @@ def create_app(
                 else status.HTTP_400_BAD_REQUEST
             )
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        except GeminiRateLimitError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)
+            ) from exc
         except GeminiHighDemandError as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
@@ -1867,6 +1877,10 @@ def create_app(
                 else status.HTTP_400_BAD_REQUEST
             )
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        except GeminiRateLimitError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)
+            ) from exc
         except GeminiHighDemandError as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
@@ -1926,6 +1940,10 @@ def create_app(
                 else status.HTTP_400_BAD_REQUEST
             )
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        except GeminiRateLimitError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)
+            ) from exc
         except GeminiHighDemandError as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)

@@ -38,7 +38,15 @@ from fastapi.testclient import TestClient
 from src.config import AppConfig
 from src.main import create_app
 from src.repository.firebase_repository import FirebaseRepository
-from src.services.gemini_client import GeminiClient, GeminiHighDemandError
+from src.services.gemini_client import (
+    FALLBACK_MODEL_PRIORITY,
+    GEMINI_429_RATE_LIMIT_MESSAGE,
+    GEMINI_503_HIGH_DEMAND_MESSAGE,
+    VALID_GEMINI_PRESETS,
+    GeminiClient,
+    GeminiHighDemandError,
+    GeminiRateLimitError,
+)
 from src.services.homework_reviewer import (
     FIRST_SUBMISSION_NOTICE,
     HomeworkReviewer,
@@ -267,9 +275,24 @@ def test_gemini_client_settings_masking_clear_key_and_custom_model_id(
     assert cleared["masked_key"] is None
 
     # Subsequent model_id-only update after clearing key must keep key cleared
-    still_cleared = client.update_settings(model_id="gemini-2.5-flash")
+    still_cleared = client.update_settings(model_id="gemini-3.8-flash")
     assert still_cleared["has_key"] is False
-    assert still_cleared["model_id"] == "gemini-2.5-flash"
+    assert still_cleared["model_id"] == "gemini-3.8-flash"
+    assert still_cleared["available_models"] == [
+        "gemini-3.8-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.5-flash",
+    ]
+    assert VALID_GEMINI_PRESETS == (
+        "gemini-3.8-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.5-flash",
+    )
+    assert FALLBACK_MODEL_PRIORITY == (
+        "gemini-3.8-flash",
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+    )
 
     # Verify _build_genai_client always uses standard Developer API (no vertexai=True)
     client_calls: list[dict[str, Any]] = []
@@ -289,33 +312,85 @@ def test_gemini_client_settings_masking_clear_key_and_custom_model_id(
     assert client_calls[1]["http_options"].timeout == 75_000
 
 
-def test_youtube_content_layers_modes_transcript_to_audio_fallback_and_503_model_fallback(
+def test_youtube_two_step_oembed_title_and_503_429_404_model_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
     Purpose:
-        Verify that `GeminiClient.generate_structured_json`:
-        1) Uses `VideoMetadata(content_layers=["TRANSCRIPT"])` in `"transcript"` mode,
-           `VideoMetadata(content_layers=["AUDIO"])` in `"audio"` mode, and
-           `VideoMetadata(fps=0.2)` in `"full_video"` mode.
-        2) Automatically falls back from `"transcript"` to `"audio"` when the video has no
-           transcript or the `TRANSCRIPT` layer raises an error.
-        3) Automatically retries once and falls back across `[selected_model, "gemini-3.5-flash",
-           "gemini-2.5-flash", "gemini-3.5-flash-lite"]` on transient `503 UNAVAILABLE` / `429`
-           errors, and raises `GeminiHighDemandError` when all models are overloaded.
+        Verify:
+        1) YouTube oEmbed title extraction (including Hebrew UTF-8 titles) and graceful
+           fallback to Gemini's `suggested_title` when oEmbed fails.
+        2) Step 1 (Fastest): `youtube-transcript-api` primary path sending transcript text
+           directly to Gemini without `file_uri`.
+        3) Step 2 (Automatic Fallback): When no transcript exists, sends canonical YouTube URL
+           with `VideoMetadata(fps=0.1)` (confirming `content_layers` is NEVER set) and falls
+           back to plain `Part.from_uri` if `video_metadata` returns HTTP 400.
+        4) Hardened model fallback across `[selected_model, "gemini-3.8-flash",
+           "gemini-3.5-flash", "gemini-3.5-flash-lite"]` continuing through `503`, `429`,
+           and `404`, and raising `GeminiHighDemandError` (503) or `GeminiRateLimitError` (429).
     Inputs:
         monkeypatch (pytest.MonkeyPatch): Pytest monkeypatch fixture.
     Outputs:
         None.
     """
     from google import genai
+    import youtube_transcript_api
 
     calls: list[dict[str, Any]] = []
-    scenario = {"mode": "normal"}
+    scenario = {
+        "mode": "normal",
+        "transcript_available": True,
+        "oembed_title": "אלגוריתמים 1 - תרגול 5: חיפוש לרוחב ודייקסטרה",
+    }
+
+    class FakeOEmbedResp:
+        def __init__(self, title: str | None) -> None:
+            self.status_code = 200 if title else 404
+            self._title = title
+
+        def json(self) -> dict[str, Any]:
+            return {"title": self._title} if self._title else {}
+
+    class FakeHttpxClient:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def __enter__(self) -> FakeHttpxClient:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            pass
+
+        def get(self, url: str) -> FakeOEmbedResp:
+            if scenario["oembed_title"] == "RAISE":
+                raise RuntimeError("oEmbed network timeout")
+            return FakeOEmbedResp(scenario["oembed_title"])
+
+    monkeypatch.setattr(httpx, "Client", FakeHttpxClient)
+
+    class FakeSnippet:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class FakeYouTubeTranscriptApi:
+        def fetch(
+            self, video_id: str, languages: list[str] | None = None
+        ) -> list[FakeSnippet]:
+            if not scenario["transcript_available"]:
+                raise RuntimeError("No transcripts were found for this video")
+            return [
+                FakeSnippet("שלום לכולם, היום נלמד אלגוריתמים בגרפים:"),
+                FakeSnippet("Breadth-First Search (BFS) and Dijkstra shortest paths."),
+            ]
+
+    monkeypatch.setattr(
+        youtube_transcript_api, "YouTubeTranscriptApi", FakeYouTubeTranscriptApi
+    )
 
     class FakeResp:
         text = (
-            '{"executive_summary": "Recitation 5 on Algorithms 1 (BFS & DFS).", '
+            '{"suggested_title": "Graph Algorithms: BFS & DFS", '
+            '"executive_summary": "Recitation 5 on Algorithms 1 (BFS & DFS).", '
             '"detailed_overview": "Paragraph 1 explaining BFS queue traversal.\\n\\nParagraph 2 explaining DFS recursion.", '
             '"key_concepts": [{"term": "BFS", "explanation": "Level-order graph traversal using a FIFO queue."}], '
             '"key_topics": ["BFS", "DFS", "Topological Sort"], '
@@ -327,36 +402,37 @@ def test_youtube_content_layers_modes_transcript_to_audio_fallback_and_503_model
 
     class FakeModelsAPI:
         def generate_content(self, *, model: str, contents: list[Any], config: Any) -> Any:
-            first_part = contents[0]
-            vm = getattr(first_part, "video_metadata", None)
+            first_item = contents[0]
+            vm = getattr(first_item, "video_metadata", None)
             layers = getattr(vm, "content_layers", None) if vm else None
+            assert not layers, f"Invalid content_layers was sent: {layers}"
             fps_val = getattr(vm, "fps", None) if vm else None
-            layer_names = [getattr(x, "value", str(x)) for x in layers] if layers else None
+            file_uri = getattr(getattr(first_item, "file_data", None), "file_uri", None)
             calls.append(
                 {
                     "model": model,
-                    "layers": layer_names,
                     "fps": fps_val,
-                    "file_uri": getattr(getattr(first_part, "file_data", None), "file_uri", None),
+                    "file_uri": file_uri,
+                    "has_video_metadata": vm is not None,
+                    "prompt": str(contents[-1]),
                 }
             )
 
-            if scenario["mode"] == "no_transcript" and layer_names == ["TRANSCRIPT"]:
-                raise ValueError("400 INVALID_ARGUMENT: No transcript available for this video.")
+            if scenario["mode"] == "reject_video_metadata_400" and vm is not None:
+                raise ValueError("400 INVALID_ARGUMENT: video_metadata rejected.")
 
-            if scenario["mode"] == "no_transcript_or_audio" and layer_names in (
-                ["TRANSCRIPT"],
-                ["AUDIO"],
-            ):
-                raise ValueError("400 INVALID_ARGUMENT: Layer unavailable for this video.")
-
-            if scenario["mode"] == "primary_503_then_fallback_ok":
+            if scenario["mode"] == "503_then_404_then_ok":
                 if model == "gemini-3.5-flash-lite":
-                    raise RuntimeError("503 UNAVAILABLE: The model is overloaded due to high demand.")
+                    raise RuntimeError("503 UNAVAILABLE: High demand.")
+                if model == "gemini-3.8-flash":
+                    raise RuntimeError("404 NOT_FOUND: Model temporarily unavailable.")
                 return FakeResp()
 
             if scenario["mode"] == "all_503":
                 raise RuntimeError("503 UNAVAILABLE: High demand across all models.")
+
+            if scenario["mode"] == "all_429":
+                raise RuntimeError("429 RESOURCE_EXHAUSTED: Quota exceeded.")
 
             return FakeResp()
 
@@ -373,73 +449,74 @@ def test_youtube_content_layers_modes_transcript_to_audio_fallback_and_503_model
     gemini = GeminiClient(repository=repo, config=cfg)
     summarizer = VideoSummarizer(repository=repo, gemini_client=gemini)
 
-    # 1. Default mode ("transcript") strips playlist params & passes content_layers=["TRANSCRIPT"]
+    # 1. Step 1 (Fastest): Transcript + Hebrew oEmbed title -> video_title & source_url saved
     res_tx = summarizer.summarize_video(
         youtube_url="https://www.youtube.com/watch?v=8UY3LQI529o&list=PLW3u28&index=1",
         lesson_tag="Lesson 5",
     )
+    assert res_tx["source_url"] == "https://www.youtube.com/watch?v=8UY3LQI529o"
     assert res_tx["youtube_url"] == "https://www.youtube.com/watch?v=8UY3LQI529o"
-    assert res_tx["video_mode"] == "transcript"
+    assert res_tx["video_title"] == "אלגוריתמים 1 - תרגול 5: חיפוש לרוחב ודייקסטרה"
+    assert res_tx["analysis_method"] == "youtube_transcript"
+    assert calls[-1]["file_uri"] is None
+    assert "Breadth-First Search (BFS)" in calls[-1]["prompt"]
+
+    # 2. oEmbed failure falls back gracefully to Gemini suggested_title + Step 2 fps=0.1 fallback
+    calls.clear()
+    scenario["transcript_available"] = False
+    scenario["oembed_title"] = "RAISE"
+    res_fps = summarizer.summarize_video(
+        youtube_url="https://youtu.be/8UY3LQI529o?t=30",
+        lesson_tag="Lesson 5",
+    )
+    assert res_fps["video_title"] == "Graph Algorithms: BFS & DFS"
+    assert res_fps["source_url"] == "https://www.youtube.com/watch?v=8UY3LQI529o"
+    assert res_fps["analysis_method"] == "youtube_video_fps_0.1"
     assert calls[-1]["file_uri"] == "https://www.youtube.com/watch?v=8UY3LQI529o"
-    assert calls[-1]["layers"] == ["TRANSCRIPT"]
+    assert calls[-1]["fps"] == 0.1
 
-    # 2. Explicit "audio" and "full_video" modes
-    res_aud = summarizer.summarize_video(
-        youtube_url="https://youtu.be/8UY3LQI529o",
-        video_mode="audio",
-    )
-    assert res_aud["video_mode"] == "audio"
-    assert calls[-1]["layers"] == ["AUDIO"]
-
-    res_full = summarizer.summarize_video(
-        youtube_url="https://youtu.be/8UY3LQI529o",
-        video_mode="full_video",
-    )
-    assert res_full["video_mode"] == "full_video"
-    assert calls[-1]["fps"] == 0.2
-
-    # 3. Automatic fallback from TRANSCRIPT -> AUDIO when video has no transcript
+    # 2b. If VideoMetadata(fps=0.1) returns 400, automatically retries with plain Part.from_uri
     calls.clear()
-    scenario["mode"] = "no_transcript"
-    res_fallback_audio = summarizer.summarize_video(
-        youtube_url="https://www.youtube.com/watch?v=8UY3LQI529o",
-        video_mode="transcript",
-    )
-    assert [c["layers"] for c in calls] == [["TRANSCRIPT"], ["AUDIO"]]
-    assert res_fallback_audio["video_mode"] == "audio"
-
-    # 3b. Automatic 3-step fallback TRANSCRIPT -> AUDIO -> Low FPS (0.2) video when both layers fail
-    calls.clear()
-    scenario["mode"] = "no_transcript_or_audio"
-    res_fallback_fps = summarizer.summarize_video(
+    scenario["mode"] = "reject_video_metadata_400"
+    res_plain = summarizer.summarize_video(
         youtube_url="https://www.youtube.com/watch?v=8UY3LQI529o",
     )
-    assert [c["layers"] for c in calls] == [["TRANSCRIPT"], ["AUDIO"], None]
-    assert calls[-1]["fps"] == 0.2
-    assert res_fallback_fps["video_mode"] == "full_video"
+    assert len(calls) == 2
+    assert calls[0]["has_video_metadata"] is True
+    assert calls[1]["has_video_metadata"] is False
+    assert res_plain["source_url"] == "https://www.youtube.com/watch?v=8UY3LQI529o"
 
-    # 4. Automatic 503 retry + model fallback (gemini-3.5-flash-lite fails 2x -> gemini-3.5-flash succeeds)
+    # 3. Fallback continues cleanly across 503 AND 404 (lite 503x2 -> 3.8-flash 404 -> 3.5-flash OK)
     calls.clear()
-    scenario["mode"] = "primary_503_then_fallback_ok"
-    res_503_recovered = summarizer.summarize_video(
+    scenario["mode"] = "503_then_404_then_ok"
+    res_recovered = summarizer.summarize_video(
         youtube_url="https://www.youtube.com/watch?v=8UY3LQI529o",
-        video_mode="audio",
     )
     assert [c["model"] for c in calls] == [
         "gemini-3.5-flash-lite",
         "gemini-3.5-flash-lite",
+        "gemini-3.8-flash",
         "gemini-3.5-flash",
     ]
-    assert res_503_recovered["model_used"] == "gemini-3.5-flash"
+    assert res_recovered["model_used"] == "gemini-3.5-flash"
 
-    # 5. When all candidate models return 503, raises GeminiHighDemandError with clear 503 detail
+    # 4. All candidate models 503 -> GeminiHighDemandError
     calls.clear()
     scenario["mode"] = "all_503"
-    with pytest.raises(GeminiHighDemandError, match="temporarily experiencing high demand"):
+    with pytest.raises(GeminiHighDemandError) as exc_503:
         summarizer.summarize_video(
             youtube_url="https://www.youtube.com/watch?v=8UY3LQI529o",
-            video_mode="audio",
         )
+    assert str(exc_503.value) == GEMINI_503_HIGH_DEMAND_MESSAGE
+
+    # 5. All candidate models 429 -> GeminiRateLimitError
+    calls.clear()
+    scenario["mode"] = "all_429"
+    with pytest.raises(GeminiRateLimitError) as exc_429:
+        summarizer.summarize_video(
+            youtube_url="https://www.youtube.com/watch?v=8UY3LQI529o",
+        )
+    assert str(exc_429.value) == GEMINI_429_RATE_LIMIT_MESSAGE
 
 
 def test_video_summarizer_youtube_canonicalization_rich_schema_and_backwards_compat() -> None:
@@ -521,7 +598,8 @@ def test_video_summarizer_youtube_canonicalization_rich_schema_and_backwards_com
     assert legacy["detailed_overview"] == ""
     assert legacy["key_concepts"] == []
     assert legacy["study_questions"] == []
-    assert legacy["video_mode"] == "transcript"
+    assert legacy["source_url"] == "https://www.youtube.com/watch?v=legacy12345"
+    assert legacy["video_title"] == "Lesson 1 Video Summary"
 
 
 def test_homework_reviewer_gated_release_first_submission_and_legacy_end_now_regression() -> None:
@@ -954,14 +1032,14 @@ def test_gemini_video_and_homework_http_endpoints_and_ui_assets() -> None:
             "youtube_url": "https://www.youtube.com/watch?v=8UY3LQI529o&list=PLW3u28&index=1",
             "lesson_tag": "Lesson 1",
             "lecturer_notes": "Dynamic Programming",
-            "video_mode": "transcript",
         },
     )
     assert ok_yt.status_code == 200
     yt_body = ok_yt.json()
     assert yt_body["source_type"] == "youtube"
+    assert yt_body["source_url"] == "https://www.youtube.com/watch?v=8UY3LQI529o"
     assert yt_body["youtube_url"] == "https://www.youtube.com/watch?v=8UY3LQI529o"
-    assert yt_body["video_mode"] == "transcript"
+    assert bool(yt_body["video_title"])
     assert yt_body["model_used"] == "gemini-3.5-flash-lite"
     assert "detailed_overview" in yt_body and len(yt_body["detailed_overview"]) > 40
     assert len(yt_body["key_concepts"]) >= 1
@@ -969,7 +1047,32 @@ def test_gemini_video_and_homework_http_endpoints_and_ui_assets() -> None:
     assert "delivery_insights" in yt_body
     vid_summary_id = yt_body["summary_id"]
 
-    # 2b. Delete Video AI summary (lecturer-protected, 404 on unknown ID, 200 removes record)
+    # 2b. Verify HTTP 503 and HTTP 429 clear error detail propagation on /api/video/summarize-youtube
+    def high_demand_transport(**kwargs: Any) -> dict[str, Any]:
+        raise GeminiHighDemandError(GEMINI_503_HIGH_DEMAND_MESSAGE)
+
+    app.state.gemini_client._transport = high_demand_transport
+    res_503 = lec_client.post(
+        "/api/video/summarize-youtube",
+        json={"youtube_url": "https://youtu.be/8UY3LQI529o"},
+    )
+    assert res_503.status_code == 503
+    assert res_503.json()["detail"] == GEMINI_503_HIGH_DEMAND_MESSAGE
+
+    def rate_limit_transport(**kwargs: Any) -> dict[str, Any]:
+        raise GeminiRateLimitError(GEMINI_429_RATE_LIMIT_MESSAGE)
+
+    app.state.gemini_client._transport = rate_limit_transport
+    res_429 = lec_client.post(
+        "/api/video/summarize-youtube",
+        json={"youtube_url": "https://youtu.be/8UY3LQI529o"},
+    )
+    assert res_429.status_code == 429
+    assert res_429.json()["detail"] == GEMINI_429_RATE_LIMIT_MESSAGE
+
+    app.state.gemini_client._transport = tracking_transport
+
+    # 2c. Delete Video AI summary (lecturer-protected, 404 on unknown ID, 200 removes record)
     assert stu_client.delete(f"/api/video/summaries/{vid_summary_id}").status_code == 403
     assert lec_client.delete("/api/video/summaries/nonexistent_vid").status_code == 404
     del_vid = lec_client.delete(f"/api/video/summaries/{vid_summary_id}")
@@ -1067,6 +1170,9 @@ def test_gemini_video_and_homework_http_endpoints_and_ui_assets() -> None:
     assert "Key Concepts & Definitions" in ai_js.text
     assert "Quick Review Questions" in ai_js.text
     assert "Summary copied to clipboard" in ai_js.text
+    assert "Watch on YouTube:" in ai_js.text
+    assert "gemini-3.8-flash" in ai_js.text
+    assert "gemini-2.5-flash" not in ai_js.text
     assert "Upload MP4 File" not in ai_js.text
     assert "Fast (Transcript)" not in ai_js.text
     assert "Audio Only" not in ai_js.text
