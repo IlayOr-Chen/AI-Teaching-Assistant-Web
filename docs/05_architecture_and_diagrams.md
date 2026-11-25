@@ -246,18 +246,20 @@ classDiagram
         +get_settings() dict
         +update_settings(api_key, model_id) dict
         -_extract_json_dict(raw_text)$ dict
-        -_is_transient_overload_error(exc)$ bool
-        -_build_youtube_part(file_uri, mime_type, video_mode)$ tuple~Any,str~
-        +generate_structured_json(prompt, media_bytes, mime_type, file_uri, video_mode, api_key_override, model_id_override, allow_stored_key, missing_key_error) dict
+        -_classify_fallback_error(exc)$ str
+        -_build_youtube_part(file_uri, mime_type, use_low_fps)$ Any
+        +generate_structured_json(prompt, media_bytes, mime_type, file_uri, api_key_override, model_id_override, allow_stored_key, missing_key_error) dict
     }
 
     class VideoSummarizer {
         +FirebaseRepository repository
         +GeminiClient gemini_client
         +validate_youtube_url(youtube_url)$ str
-        -_build_prompt(canonical_url, lesson_tag, lecturer_notes, video_mode)$ str
+        -_fetch_youtube_title(canonical_url)$ str
+        -_fetch_youtube_transcript(video_id)$ str
+        -_build_prompt(canonical_url, lesson_tag, lecturer_notes, transcript_text, video_title)$ str
         -_normalize_key_concepts(raw_concepts)$ list~dict~
-        +summarize_video(youtube_url, lesson_tag, lecturer_notes, video_mode) dict
+        +summarize_video(youtube_url, lesson_tag, lecturer_notes) dict
         +list_summaries() list~dict~
         +delete_summary(summary_id) dict
     }

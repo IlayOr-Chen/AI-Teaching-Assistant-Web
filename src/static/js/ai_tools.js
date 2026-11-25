@@ -18,9 +18,9 @@ const LESSON_TAGS = ['Lesson 1', 'Lesson 2', 'Lesson 3', 'Lesson 4', 'Lesson 5',
 const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash-lite';
 
 const VALID_GEMINI_MODELS = [
+    'gemini-3.8-flash',
     'gemini-3.5-flash-lite',
     'gemini-3.5-flash',
-    'gemini-2.5-flash',
 ];
 
 const STUDENT_BYOK_KEY_STORAGE = 'ta_student_gemini_api_key';
@@ -39,15 +39,16 @@ const HOMEWORK_FILE_ACCEPT = [
  */
 function formatSummaryAsMarkdown(s) {
     const del = s.delivery_insights || {};
+    const title = s.video_title || s.filename || 'Lecture Video Summary';
+    const sourceUrl = s.source_url || s.youtube_url || '';
     const lines = [
-        `# ${s.lesson_tag || 'Lecture'} — AI Lecture Video Summary`,
-        `- **YouTube URL:** ${s.youtube_url || s.filename || '-'}`,
+        `# ${s.lesson_tag || 'Lecture'} — ${title}`,
+        sourceUrl ? `- **Watch on YouTube:** ${sourceUrl}` : null,
         `- **Model Used:** ${s.model_used || DEFAULT_GEMINI_MODEL}`,
-        `- **Analysis Mode:** ${s.video_mode || 'transcript'}`,
         '',
         '## Executive Summary (TL;DR)',
         s.executive_summary || '-',
-    ];
+    ].filter((line) => line !== null);
 
     if (s.detailed_overview && String(s.detailed_overview).trim()) {
         lines.push('', '## Lecture Overview & Walkthrough', String(s.detailed_overview).trim());
@@ -217,17 +218,19 @@ export function renderVideoSummaryTab(container, ctx) {
 
     const renderSummaryCard = (s) => {
         const del = s.delivery_insights || {};
-        const modeLabelMap = {
-            transcript: 'YouTube Transcript',
-            audio: 'YouTube Audio',
-            full_video: 'YouTube Video (Low FPS)',
-        };
-        const modeBadge = modeLabelMap[s.video_mode] || 'YouTube Video';
+        const methodBadge = s.analysis_method === 'youtube_transcript'
+            ? 'YouTube Transcript'
+            : 'YouTube Video';
+        const displayTitle = s.video_title
+            || (s.filename && !String(s.filename).startsWith('http') ? s.filename : `${s.lesson_tag || 'Lecture'} Video Summary`);
+        const sourceUrl = s.source_url
+            || s.youtube_url
+            || (s.filename && String(s.filename).startsWith('http') ? s.filename : '');
 
         const copyBtn = button('Copy', {
             cls: 'sm ghost',
             iconName: 'copy',
-            'aria-label': `Copy summary ${s.filename || s.summary_id}`,
+            'aria-label': `Copy summary ${displayTitle}`,
         });
         copyBtn.addEventListener('click', async () => {
             const md = formatSummaryAsMarkdown(s);
@@ -239,11 +242,11 @@ export function renderVideoSummaryTab(container, ctx) {
         const deleteBtn = button('Delete', {
             cls: 'sm ghost danger',
             iconName: 'trash',
-            'aria-label': `Delete summary ${s.filename || s.summary_id}`,
+            'aria-label': `Delete summary ${displayTitle}`,
         });
         deleteBtn.addEventListener('click', () => {
             if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
-                const ok = window.confirm(`Delete summary for "${s.filename || s.lesson_tag || 'this lecture'}"?`);
+                const ok = window.confirm(`Delete summary for "${displayTitle}"?`);
                 if (!ok) return;
             }
             withLoading(deleteBtn, async () => {
@@ -284,11 +287,24 @@ export function renderVideoSummaryTab(container, ctx) {
 
         const studyQuestions = Array.isArray(s.study_questions) ? s.study_questions.filter(Boolean) : [];
 
+        const footerSection = sourceUrl
+            ? el('div', { class: 'summary-footer' }, [
+                el('span', { html: icon('video') }),
+                el('span', {}, 'Watch on YouTube:'),
+                el('a', {
+                    class: 'summary-source-link',
+                    href: sourceUrl,
+                    target: '_blank',
+                    rel: 'noopener noreferrer',
+                }, sourceUrl),
+            ])
+            : null;
+
         return el('div', { class: 'card stack' }, [
             el('div', { class: 'row' }, [
                 el('span', { class: 'chip ok' }, s.lesson_tag || 'Lesson 1'),
-                el('strong', { dir: 'auto' }, s.youtube_url || s.filename),
-                el('span', { class: 'faint' }, `${modeBadge} · Model: ${s.model_used} · ${formatTime(s.created_at)}`),
+                el('strong', { dir: 'auto', style: 'font-size:1.05rem' }, displayTitle),
+                el('span', { class: 'faint' }, `${methodBadge} · Model: ${s.model_used} · ${formatTime(s.created_at)}`),
                 el('span', { class: 'spacer' }),
                 el('span', { class: 'chip ok' }, `Delivery: ${del.overall_rating || 'Excellent'}`),
                 copyBtn,
@@ -322,6 +338,7 @@ export function renderVideoSummaryTab(container, ctx) {
                     ]),
                 ]),
             ]),
+            footerSection,
         ]);
     };
 

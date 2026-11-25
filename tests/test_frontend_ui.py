@@ -121,14 +121,16 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
         ],
         "/static/js/polls_comments.js": ["Selected — click again to unvote"],
         "/static/js/ai_tools.js": [
+            "gemini-3.8-flash",
             "gemini-3.5-flash-lite",
             "gemini-3.5-flash",
-            "gemini-2.5-flash",
             "Clear Key",
             "No API key configured",
             "No API key saved",
             "AI Lecture Video Summarizer",
             "Analyze YouTube Video",
+            "Watch on YouTube:",
+            "summary-footer",
             "Lecture Overview & Walkthrough",
             "Key Concepts & Definitions",
             "Quick Review Questions",
@@ -158,6 +160,7 @@ def test_frontend_static_assets_and_mime_types(ui_client: TestClient) -> None:
     assert "modelSelect" not in ai_js
     assert "Upload MP4 File" not in ai_js
     assert "/api/video/summarize?" not in ai_js
+    assert "gemini-2.5-flash" not in ai_js
     assert "Fast (Transcript)" not in ai_js
     assert "Audio Only" not in ai_js
     assert "Full Video (Low FPS)" not in ai_js
