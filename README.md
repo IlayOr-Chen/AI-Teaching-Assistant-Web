@@ -133,7 +133,7 @@ AI-Teaching-Assistant-Web/
    * **Git Bash / macOS / Linux:** `cp .env.example .env`
    * Target Firebase RTDB URL: `https://ai-teaching-assistant-web-default-rtdb.firebaseio.com/`
    * Place `serviceAccountKey.json` in the project root directory (matching `FIREBASE_CREDENTIALS_PATH=serviceAccountKey.json` in `.env`).
-   * **Pure BYOK (No `.env` Gemini Key Needed):** Leave `GEMINI_API_KEY=` blank in `.env`. Lecturers enter (and can clear) their own key directly in the **Video AI** panel, and each Student enters their own key in the **Homework** panel (stored strictly in browser `localStorage`).
+   * **Pure BYOK (No `.env` Gemini Key Needed):** No `GEMINI_API_KEY` is needed in `.env`. Lecturers enter (and can clear) their own key directly in the **Video AI** panel, and each Student enters their own key in the **Homework** panel (stored strictly in browser `localStorage`).
    * `.env`, `serviceAccountKey.json`, and `venv/` are excluded via [.gitignore](.gitignore).
 
 4. **Run the automated `pytest` suite (`52/52` passing):**
